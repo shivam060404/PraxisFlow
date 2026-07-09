@@ -1,0 +1,72 @@
+from prisma import Prisma
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+import logging
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Global Prisma client instance
+prisma_client: Prisma | None = None
+
+
+async def get_prisma() -> Prisma:
+    """Get or create Prisma client instance."""
+    global prisma_client
+    if prisma_client is None:
+        prisma_client = Prisma(
+            datasource={
+                "url": settings.DATABASE_URL
+            },
+            auto_register=True,
+            log_queries=settings.LOG_LEVEL == "DEBUG",
+        )
+        await prisma_client.connect()
+        logger.info("Prisma client connected")
+    elif not prisma_client.is_connected():
+        await prisma_client.connect()
+        logger.info("Prisma client reconnected")
+    return prisma_client
+
+
+async def close_prisma() -> None:
+    """Close Prisma client connection."""
+    global prisma_client
+    if prisma_client and prisma_client.is_connected():
+        await prisma_client.disconnect()
+        prisma_client = None
+        logger.info("Prisma client disconnected")
+
+
+@asynccontextmanager
+async def prisma_context() -> AsyncGenerator[Prisma, None]:
+    """Context manager for Prisma client."""
+    client = await get_prisma()
+    try:
+        yield client
+    except Exception:
+        # Connection might be lost, try to reconnect next time
+        global prisma_client
+        if prisma_client:
+            await prisma_client.disconnect()
+            prisma_client = None
+        raise
+
+
+# Dependency for FastAPI
+async def get_db() -> AsyncGenerator[Prisma, None]:
+    """FastAPI dependency for database access."""
+    async with prisma_context() as db:
+        yield db
+
+
+# RLS Helper
+async def set_tenant_context(db: Prisma, tenant_id: str) -> None:
+    """Set PostgreSQL RLS context for the current tenant."""
+    await db.execute_raw(f"SELECT set_current_tenant('{tenant_id}')")
+
+
+async def clear_tenant_context(db: Prisma) -> None:
+    """Clear PostgreSQL RLS context."""
+    await db.execute_raw("RESET app.current_tenant")

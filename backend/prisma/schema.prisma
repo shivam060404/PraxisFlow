@@ -1,0 +1,313 @@
+generator client {
+  provider = "prisma-client-py"
+  binaryTargets = ["native", "linux-musl"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Tenant Isolation ───
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("starter")
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  meetings     Meeting[]
+  integrations Integration[]
+  tasks        Task[]
+  aiAuditLogs  AiAuditLog[]
+  meetingFlags MeetingFlag[]
+
+  @@index([slug])
+}
+
+// ─── Users & Identity ───
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  email        String
+  fullName     String
+  avatarUrl    String?
+  role         String   @default("member")
+  clerkUserId  String?  @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant       Tenant     @relation(fields: [tenantId], references: [id])
+  attendees    Attendee[]
+  assignedTasks Task[]    @relation("Assignee")
+  createdTasks  Task[]    @relation("Creator")
+  resolvedFlags MeetingFlag[] @relation("ResolvedFlags")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([clerkUserId])
+}
+
+// ─── Meetings ───
+model Meeting {
+  id              String        @id @default(uuid())
+  tenantId        String
+  title           String
+  description     String?
+  scheduledAt     DateTime
+  durationMinutes Int?
+  status          MeetingStatus @default(UPLOADED)
+  audioUrl        String?
+  recordingSource String        @default("upload")
+  calendarEventId String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  attendees  Attendee[]
+  transcript Transcript?
+  tasks      Task[]
+  flags      MeetingFlag[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, scheduledAt])
+}
+
+enum MeetingStatus {
+  UPLOADED
+  PROCESSING
+  TRANSCRIBED
+  EXTRACTED
+  COMPLETED
+  ERROR
+}
+
+// ─── Attendees ───
+model Attendee {
+  id             String   @id @default(uuid())
+  meetingId      String
+  userId         String?
+  email          String
+  displayName    String
+  speakerLabel   String?
+  responseStatus String   @default("accepted")
+  createdAt      DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id])
+
+  @@unique([meetingId, email])
+  @@index([meetingId])
+}
+
+// ─── Transcripts ───
+model Transcript {
+  id           String   @id @default(uuid())
+  meetingId    String   @unique
+  fullText     String   @db.Text
+  language     String   @default("en")
+  wordCount    Int      @default(0)
+  durationMs   Int      @default(0)
+  processedAt  DateTime      DateTime @default(now())
+  redactionApplied Boolean @default(false)
+
+  meeting  Meeting    @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  utterances Utterance[]
+
+  @@index([meetingId])
+}
+
+model Utterance {
+  id              String   @id @default(uuid())
+  transcriptId    String
+  speakerLabel    String
+  text            String   @db.Text
+  startTimeMs     Int
+  endTimeMs       Int
+  confidence      Float?
+  wordStartIdx    Int?
+  wordEndIdx      Int?
+  hasRedactions   Boolean  @default(false)
+  redactionMap    Json?
+
+  transcript Transcript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  @@index([transcriptId, wordStartIdx])
+  @@index([transcriptId, startTimeMs])
+}
+
+// ─── Tasks (Extracted Action Items) ───
+model Task {
+  id                  String        @id @default(uuid())
+  tenantId            String
+  meetingId           String
+  title               String
+  description         String        @db.Text
+  taskType            TaskType
+  status              TaskStatus    @default(EXTRACTED)
+  priority            String?
+
+  // Assignee resolution
+  assigneeHint        String?
+  assigneeId          String?
+  assigneeResolvedBy  String?
+
+  // Deadline resolution
+  deadlineHint        String?
+  deadlineDate        DateTime?
+  deadlineResolvedBy  String?
+
+  // Transcript provenance
+  transcriptWordStart Int
+  transcriptWordEnd   Int
+  sourceQuote         String        @db.Text
+
+  // Verification
+  verificationStatus  VerificationStatus @default(PENDING)
+  verificationReasoning String?     @db.Text
+  extractionConfidence Float
+
+  // Integration sync
+  externalId          String?
+  externalUrl         String?
+  integrationId       String?
+  lastSyncedAt        DateTime?
+  syncStatus          SyncStatus?
+
+  // Metadata
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  createdBy           String        @default("ai_agent")
+
+  tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  meeting    Meeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  assignee   User?        @relation("Assignee", fields: [assigneeId], references: [id])
+  integration Integration? @relation(fields: [integrationId], references: [id])
+  auditLogs  TaskAuditLog[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, assigneeId])
+  @@index([meetingId, taskType])
+  @@index([assigneeId, status])
+  @@index([externalId, integrationId])
+}
+
+enum TaskType {
+  ACTION_ITEM
+  DECISION
+  FOLLOW_UP
+  BLOCKER
+}
+
+enum TaskStatus {
+  EXTRACTED
+  PENDING_REVIEW
+  VERIFIED
+  ASSIGNED
+  SYNCED
+  COMPLETED
+  DISMISSED
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  NEEDS_REVIEW
+  FAILED
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCED
+  SYNC_FAILED
+  CONFLICT
+}
+
+// ─── Task State Machine Audit Log ───
+model TaskAuditLog {
+  id             String     @id @default(uuid())
+  taskId         String
+  previousStatus TaskStatus?
+  newStatus      TaskStatus
+  changedBy      String
+  reason         String?    @db.Text
+  metadata       Json?
+  createdAt      DateTime   @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+}
+
+// ─── Integrations ───
+model Integration {
+  id            String            @id @default(uuid())
+  tenantId      String
+  provider      IntegrationProvider
+  displayName   String
+  status        String            @default("ACTIVE")
+  config        Json              @default("{}")
+  webhookSecret String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tasks  Task[]
+
+  @@unique([tenantId, provider])
+  @@index([tenantId])
+}
+
+enum IntegrationProvider {
+  jira
+  asana
+  linear
+  slack
+  teams
+}
+
+// ─── AI Audit Logs ───
+model AiAuditLog {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  taskId             String?
+  meetingId          String?
+  decisionType       String
+  model              String
+  promptTokens       Int?
+  completionTokens   Int?
+  rawInputHash       String?
+  rawOutput          String?
+  structuredOutput   Json?
+  verificationResult Json?
+  latencyMs          Int?
+  createdAt          DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  task   Task?   @relation(fields: [taskId], references: [id])
+  meeting Meeting? @relation(fields: [meetingId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([taskId])
+  @@index([meetingId])
+}
+
+// ─── Meeting Flags ───
+model MeetingFlag {
+  id          String   @id @default(uuid())
+  meetingId   String
+  flagType    String
+  message     String   @db.Text
+  resolved    Boolean  @default(false)
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  resolver  User?   @relation("ResolvedFlags", fields: [resolvedBy], references: [id])
+
+  @@index([meetingId])
+}
