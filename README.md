@@ -1,52 +1,76 @@
-# AI Meeting Intelligence & Action Command Center
+# PraxisFlow — AI Meeting Intelligence & Action Command Center
 
-An enterprise-grade agentic system that transforms passive meeting recordings into structured, trackable, and accountable execution workflows.
+An enterprise-grade agentic system that transforms passive meeting recordings into structured, trackable, and accountable execution workflows. Powered by LangGraph multi-agent extraction, Deepgram ASR, and bi-directional project management integrations.
 
-## Architecture Overview
+[![GitHub](https://img.shields.io/badge/GitHub-PraxisFlow-181717?logo=github)](https://github.com/shivam060404/PraxisFlow)
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   Ingestion     │────▶│  AI Processing   │────▶│  Data & Memory  │
 │   Layer         │     │  Engine          │     │  Layer          │
+│                 │     │                  │     │                 │
+│ • Audio Upload  │     │ • LangGraph      │     │ • PostgreSQL    │
+│ • Deepgram ASR  │     │ • Extraction     │     │ • Qdrant        │
+│ • PII Redaction │     │ • Verification   │     │ • Neo4j         │
+│ • MinIO Storage │     │ • Deduplication  │     │ • Redis         │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
                                                         │
-┌─────────────────┐     ┌──────────────────┐          │
-│  Presentation   │◀────│  Application     │◀─────────┘
+┌─────────────────┐     ┌──────────────────┐            │
+│  Presentation   │◀────│  Application     │◀───────────┘
 │  Layer          │     │  / API Layer     │
+│                 │     │                  │
+│ • Next.js 15    │     │ • FastAPI        │
+│ • shadcn/ui     │     │ • WebSocket      │
+│ • Kanban Board  │     │ • Celery Workers │
+│ • Real-time WS  │     │ • Kafka Events   │
 └─────────────────┘     └──────────────────┘
 ```
 
-### Core Components
+## Tech Stack
 
-- **ASR Pipeline**: Deepgram Nova-2 with speaker diarization
-- **Extraction Agent**: LangGraph multi-agent pipeline (Llama 3.3 70B via Groq)
-- **Verification Agent**: Anti-hallucination guardrail (separate LLM pass)
-- **Entity Resolution**: Neo4j graph + fuzzy matching for assignee mapping
-- **Context Assembly**: LlamaIndex hybrid RAG (Qdrant + Neo4j + PostgreSQL)
-- **Event Bus**: Kafka for async event-driven processing
-- **Integrations**: Adapter pattern for Jira, Asana, Linear, Slack
-- **Dashboard**: Next.js 15 + shadcn/ui with real-time WebSocket updates
+| Layer | Technology |
+|-------|-----------|
+| **ASR** | Deepgram Nova-2 (speaker diarization, word-level timestamps) |
+| **LLM Extraction** | Llama 3.3 70B via Groq (LangGraph multi-node pipeline) |
+| **Verification** | Anti-hallucination guardrail (faithfulness/hallucination/completeness scoring) |
+| **Entity Resolution** | Neo4j graph traversal + rapidfuzz fuzzy matching |
+| **PII Redaction** | Microsoft Presidio (analyzer + anonymizer) |
+| **Database** | PostgreSQL 16 + pgvector, Row-Level Security |
+| **Vector Store** | Qdrant v1.12 |
+| **Graph DB** | Neo4j 5.24 Enterprise (APOC + GDS) |
+| **Message Queue** | Apache Kafka (KRaft mode) |
+| **Task Queue** | Celery + Redis |
+| **Object Storage** | MinIO (S3-compatible) |
+| **Backend** | FastAPI, Prisma ORM, Pydantic v2 |
+| **Frontend** | Next.js 15, TypeScript, shadcn/ui, TanStack Query, Zustand |
+| **Auth** | Clerk (JWT) |
+| **Integrations** | Jira, Asana, Linear, Slack (adapter pattern) |
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker & Docker Compose
+- Node.js 18+ and Python 3.11+
 - API Keys: Deepgram, Groq, OpenAI
-- (Optional) Clerk for authentication
 
-### 1. Clone and Configure
+### 1. Clone & Configure
 
 ```bash
-cd ai-meeting-intelligence
+git clone https://github.com/shivam060404/PraxisFlow.git
+cd PraxisFlow
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys (DEEPGRAM_API_KEY, GROQ_API_KEY, OPENAI_API_KEY)
 ```
 
 ### 2. Start Infrastructure
 
 ```bash
-docker-compose up -d postgres qdrant neo4j kafka redis minio
+docker-compose up -d postgres qdrant neo4j kafka redis minio minio-init
 ```
 
 ### 3. Initialize Database
@@ -54,6 +78,7 @@ docker-compose up -d postgres qdrant neo4j kafka redis minio
 ```bash
 cd backend
 pip install -r requirements.txt
+prisma generate
 prisma db push
 ```
 
@@ -66,7 +91,7 @@ uvicorn app.main:app --reload --port 8000
 
 # Terminal 2: Celery Worker
 cd backend
-celery -A app.workers.celery_app worker --loglevel=info
+celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
 
 # Terminal 3: Frontend
 cd frontend
@@ -74,127 +99,197 @@ npm install
 npm run dev
 ```
 
-### 5. Access
+### 5. Or use Docker Compose for everything
 
-- **Frontend**: http://localhost:3000
-- **API Docs**: http://localhost:8000/docs
-- **Kafka UI**: http://localhost:8080
-- **MinIO Console**: http://localhost:9001
-- **Neo4j Browser**: http://localhost:7474
+```bash
+docker-compose up -d
+```
+
+### 6. Access
+
+| Service | URL |
+|---------|-----|
+| **Frontend Dashboard** | http://localhost:3000 |
+| **API Docs (Swagger)** | http://localhost:8000/docs |
+| **Kafka UI** | http://localhost:8080 |
+| **MinIO Console** | http://localhost:9001 (ami / ami_dev_password) |
+| **Neo4j Browser** | http://localhost:7474 (neo4j / ami_dev_password) |
+| **Qdrant Dashboard** | http://localhost:6333/dashboard |
 
 ## Project Structure
 
 ```
-ai-meeting-intelligence/
+PraxisFlow/
 ├── backend/
 │   ├── app/
-│   │   ├── api/              # FastAPI routes
-│   │   ├── agents/           # LangGraph agents
-│   │   ├── db/               # Prisma database
-│   │   ├── integrations/     # External tool adapters
-│   │   ├── schemas/          # Pydantic models
-│   │   ├── services/         # Business logic
-│   │   ├── workers/          # Celery tasks & Kafka consumers
-│   │   └── main.py           # FastAPI app
-│   ├── prisma/
-│   │   └── schema.prisma     # Database schema
-│   ├── requirements.txt
-│   └── Dockerfile.dev
+│   │   ├── api/                  # FastAPI route handlers
+│   │   │   ├── meetings.py       # Meeting CRUD + upload + reprocess
+│   │   │   ├── tasks.py          # Task CRUD + state machine + bulk ops
+│   │   │   ├── transcripts.py    # Transcript retrieval + search
+│   │   │   ├── integrations.py   # Integration CRUD + webhooks
+│   │   │   ├── websocket.py      # Real-time WebSocket (tenant-isolated)
+│   │   │   ├── users.py          # User management
+│   │   │   └── metrics.py        # Analytics endpoints
+│   │   ├── agents/               # LangGraph AI pipeline
+│   │   │   ├── extraction_graph.py   # 6-node pipeline (chunk→extract→dedup→verify→resolve→persist)
+│   │   │   ├── graph_runner.py       # Pipeline orchestrator with streaming support
+│   │   │   ├── entity_resolution.py  # Neo4j + fuzzy matching assignee resolver
+│   │   │   └── schemas.py            # Pydantic models for pipeline state
+│   │   ├── db/prisma.py          # Prisma client + RLS helpers
+│   │   ├── integrations/         # External tool adapters
+│   │   │   ├── factory.py        # IntegrationPort ABC + adapter factory
+│   │   │   └── jira.py           # Jira, Asana, Linear, Slack adapters
+│   │   ├── schemas/              # Pydantic request/response models
+│   │   ├── services/             # Business logic
+│   │   │   ├── asr.py            # Deepgram transcription service
+│   │   │   ├── kafka_events.py   # Event bus (producer + consumer)
+│   │   │   ├── pii_redaction.py  # Microsoft Presidio PII redaction
+│   │   │   └── storage.py        # MinIO object storage
+│   │   ├── workers/              # Async task processing
+│   │   │   ├── celery_app.py     # Celery config + task routing
+│   │   │   ├── tasks.py          # Meeting processing pipeline tasks
+│   │   │   └── kafka_consumers.py # Event-driven consumer handlers
+│   │   ├── core/config.py        # Settings via pydantic-settings
+│   │   └── main.py               # FastAPI app + middleware + lifecycle
+│   ├── prisma/schema.prisma      # Database schema (11 models, 6 enums)
+│   ├── tests/                    # pytest test suite
+│   └── requirements.txt
 ├── frontend/
-│   ├── app/
-│   │   ├── dashboard/        # Next.js pages
-│   │   └── components/       # React components
-│   ├── components/ui/        # shadcn/ui components
-│   ├── lib/                  # Utilities & API client
+│   ├── app/dashboard/            # Next.js pages
+│   │   ├── meetings/             # Meeting list + detail + upload
+│   │   ├── board/                # Execution board (Kanban)
+│   │   ├── metrics/              # Analytics dashboard
+│   │   ├── team/                 # Team management
+│   │   └── settings/             # Integration settings
+│   ├── components/
+│   │   ├── dashboard/            # Feature components
+│   │   │   ├── execution-board.tsx   # Drag-and-drop Kanban
+│   │   │   ├── task-card.tsx         # Task card with status badges
+│   │   │   ├── task-detail-panel.tsx # Slide-over detail panel
+│   │   │   └── filter-sidebar.tsx    # Multi-criteria filter
+│   │   ├── layout/               # App shell + sidebar
+│   │   └── ui/                   # 17 shadcn/ui primitives
+│   ├── lib/
+│   │   ├── api.ts                # Axios API client (Clerk auth)
+│   │   ├── store.ts              # Zustand state management
+│   │   └── utils.ts              # Helpers
 │   └── package.json
 ├── infrastructure/
 │   ├── docker/
-│   ├── terraform/
-│   └── k8s/
-├── docker-compose.yml
-└── .env.example
+│   │   └── init-postgres.sql     # RLS policies + seed data
+│   ├── k8s/                      # Kubernetes manifests (planned)
+│   └── terraform/                # IaC (planned)
+├── docker-compose.yml            # Full dev stack (12 services)
+├── .env.example
+└── .gitignore
 ```
 
 ## Key Features
 
-### 1. Meeting Processing Pipeline
-- **Upload** audio/video files (up to 500MB)
-- **Automatic transcription** with speaker diarization
-- **AI extraction** of action items, decisions, follow-ups, blockers
-- **Verification** to prevent hallucinations
-- **Entity resolution** to map names to actual users
+### 1. AI-Powered Meeting Processing Pipeline
+- **Upload** audio/video files (up to 500MB, supports mp3/wav/mp4/webm/m4a)
+- **Automatic transcription** via Deepgram Nova-2 with speaker diarization
+- **LangGraph extraction** pipeline: Chunking → LLM Extraction → Deduplication → Verification → Entity Resolution → Persistence
+- **Anti-hallucination verification** — faithfulness, hallucination, and completeness scoring per task
+- **Entity resolution** — maps "Sarah from engineering" → actual User via Neo4j graph + fuzzy matching
+- **Deadline resolution** — parses "by Friday", "end of quarter", "in 2 weeks" into ISO dates
+- **PII redaction** via Microsoft Presidio before storage
 
 ### 2. Execution Board (Kanban)
-- Drag-and-drop task management
-- Status workflow: Extracted → Verified → Assigned → Synced → Completed
-- Real-time updates via WebSocket
-- Bulk actions support
+- Drag-and-drop task management with state machine validation
+- Full lifecycle: `EXTRACTED → PENDING_REVIEW → VERIFIED → ASSIGNED → SYNCED → COMPLETED`
+- Handles edge states: `SYNC_FAILED`, `CONFLICT`, `DISMISSED`
+- Optimistic UI updates via TanStack Query
+- Real-time sync via WebSocket
 
 ### 3. Meeting Context View
 - Side-by-side transcript and extracted tasks
-- Bi-directional linking (click task → jump to transcript)
+- Bi-directional linking — click task to jump to source quote in transcript
 - Speaker identification with color coding
-- Search and filter transcript
+- Full-text search across transcripts
 
-### 4. Team Accountability Metrics
+### 4. Bi-Directional Integrations
+- **Outbound**: Push verified tasks to Jira, Asana, Linear, or post to Slack
+- **Inbound**: Receive webhook status updates from external tools
+- Adapter pattern — add new integrations by implementing `IntegrationPort`
+- Webhook signature verification (HMAC-SHA256)
+
+### 5. Multi-Tenant Architecture
+- PostgreSQL Row-Level Security (RLS) for tenant isolation
+- Tenant context set via middleware on every request
+- Per-tenant Kafka event partitioning
+
+### 6. Team Accountability Metrics
 - Extraction accuracy trends (precision/recall/F1)
-- Task completion funnel
-- Individual and team performance
+- Task completion funnel visualization
+- AI audit log — every LLM decision is logged with token counts, latency, and raw output
 
-### 5. Bi-directional Integrations
-- Push tasks to Jira/Asana/Linear
-- Sync status updates back from external tools
-- Conflict resolution
-
-## API Endpoints
+## API Reference
 
 ### Meetings
-- `POST /api/v1/meetings/upload` - Upload meeting file
-- `GET /api/v1/meetings` - List meetings
-- `GET /api/v1/meetings/{id}` - Get meeting details
-- `POST /api/v1/meetings/{id}/process` - Reprocess meeting
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/meetings/upload` | Upload meeting audio + metadata |
+| `GET` | `/api/v1/meetings` | List meetings (paginated, filterable) |
+| `GET` | `/api/v1/meetings/{id}` | Get meeting with transcript + tasks |
+| `PATCH` | `/api/v1/meetings/{id}` | Update meeting |
+| `DELETE` | `/api/v1/meetings/{id}` | Delete meeting + audio |
+| `POST` | `/api/v1/meetings/{id}/process` | Reprocess meeting |
 
 ### Tasks
-- `GET /api/v1/tasks` - List tasks with filters
-- `GET /api/v1/tasks/{id}` - Get task details
-- `PATCH /api/v1/tasks/{id}` - Update task
-- `POST /api/v1/tasks/{id}/verify` - Verify task
-- `POST /api/v1/tasks/{id}/assign` - Assign task
-- `POST /api/v1/tasks/bulk-update` - Bulk update tasks
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/tasks` | List tasks (filter by status, type, assignee, priority) |
+| `GET` | `/api/v1/tasks/{id}` | Get task with audit log |
+| `PATCH` | `/api/v1/tasks/{id}` | Update task (state machine validated) |
+| `POST` | `/api/v1/tasks/{id}/verify` | Human-in-the-loop verification |
+| `POST` | `/api/v1/tasks/{id}/assign` | Assign to user |
+| `POST` | `/api/v1/tasks/{id}/dismiss` | Dismiss task |
+| `POST` | `/api/v1/tasks/bulk-update` | Bulk update |
+| `GET` | `/api/v1/tasks/{id}/audit-log` | Get state machine audit trail |
 
 ### Transcripts
-- `GET /api/v1/transcripts/meeting/{meetingId}` - Get transcript
-- `GET /api/v1/transcripts/{id}/utterances` - Get utterances
-- `GET /api/v1/transcripts/{id}/span` - Get transcript segment
-- `GET /api/v1/transcripts/{id}/search` - Search transcript
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/transcripts/meeting/{id}` | Get transcript by meeting |
+| `GET` | `/api/v1/transcripts/{id}/utterances` | Get diarized utterances |
+| `GET` | `/api/v1/transcripts/{id}/span` | Get word-range segment |
+| `GET` | `/api/v1/transcripts/{id}/search` | Full-text search |
 
 ### Integrations
-- `POST /api/v1/integrations` - Create integration
-- `GET /api/v1/integrations` - List integrations
-- `POST /api/v1/integrations/{id}/test` - Test connection
-
-### Webhooks
-- `POST /api/v1/integrations/webhooks/jira` - Jira webhook
-- `POST /api/v1/integrations/webhooks/asana` - Asana webhook
-- `POST /api/v1/integrations/webhooks/linear` - Linear webhook
-- `POST /api/v1/integrations/webhooks/slack` - Slack webhook
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/integrations` | Create integration |
+| `GET` | `/api/v1/integrations` | List integrations |
+| `POST` | `/api/v1/integrations/{id}/test` | Test connection |
+| `POST` | `/api/v1/integrations/webhooks/{provider}` | Receive webhook |
 
 ## Configuration
 
-### Environment Variables
+### Required Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `DEEPGRAM_API_KEY` | Deepgram Nova-2 API key | Yes |
-| `GROQ_API_KEY` | Groq API key for Llama 3.3 70B | Yes |
-| `OPENAI_API_KEY` | OpenAI API key for embeddings | Yes |
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `NEO4J_URI` | Neo4j Bolt URI | Yes |
-| `NEO4J_PASSWORD` | Neo4j password | Yes |
-| `QDRANT_URL` | Qdrant HTTP URL | Yes |
-| `KAFKA_BOOTSTRAP_SERVERS` | Kafka bootstrap servers | Yes |
-| `CLERK_PUBLISHABLE_KEY` | Clerk publishable key | No |
-| `CLERK_SECRET_KEY` | Clerk secret key | No |
+| Variable | Description |
+|----------|-------------|
+| `DEEPGRAM_API_KEY` | Deepgram Nova-2 ASR |
+| `GROQ_API_KEY` | Groq API (Llama 3.3 70B) |
+| `OPENAI_API_KEY` | OpenAI embeddings (text-embedding-3-large) |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis for Celery broker + cache |
+
+### Optional Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NEO4J_URI` | Neo4j Bolt URI | `bolt://localhost:7687` |
+| `QDRANT_URL` | Qdrant HTTP URL | `http://localhost:6333` |
+| `KAFKA_BOOTSTRAP_SERVERS` | Kafka servers | `localhost:9092` |
+| `CLERK_PUBLISHABLE_KEY` | Clerk auth | — |
+| `EXTRACTION_MODEL` | LLM model for extraction | `llama-3.3-70b-versatile` |
+| `CHUNK_SIZE` | Transcript chunk size (words) | `2000` |
+| `VERIFICATION_FAITHFULNESS_THRESHOLD` | Min faithfulness score | `0.7` |
+| `NAME_MATCH_THRESHOLD` | Fuzzy match threshold | `80` |
+
+See [.env.example](.env.example) for the full list.
 
 ## Development
 
@@ -212,33 +307,34 @@ cd backend
 prisma migrate dev --name migration_name
 ```
 
-### Adding New Integration
+### Adding a New Integration
 
-1. Create adapter in `backend/app/integrations/{provider}.py`
-2. Implement `IntegrationPort` interface
-3. Register in `backend/app/integrations/factory.py`
+1. Create adapter class implementing `IntegrationPort` in `backend/app/integrations/`
+2. Implement: `create_task()`, `update_task()`, `delete_task()`, `normalize_webhook()`, `verify_webhook_signature()`
+3. Register in `backend/app/integrations/factory.py`:
+   ```python
+   IntegrationAdapterFactory.register("my_provider", MyAdapter)
+   ```
 
 ## Production Deployment
 
-### Kubernetes (Helm/Terraform)
-See `infrastructure/k8s/` and `infrastructure/terraform/`
-
 ### Required Infrastructure
-- PostgreSQL 16+ with pgvector
+- PostgreSQL 16+ with pgvector extension
 - Qdrant (managed or self-hosted)
 - Neo4j Enterprise 5.24+
-- Kafka 3.8+ (MSK/Confluent)
+- Kafka 3.8+ (MSK / Confluent Cloud)
 - Redis 7+
-- Object storage (S3/MinIO)
+- S3-compatible object storage
 
-### Security
+### Security Features
 - TLS 1.3 for all connections
-- Row-level security for multi-tenancy
-- PII redaction at ingestion
-- Encrypted secrets via HashiCorp Vault
-- Audit logging for all AI decisions
+- Row-Level Security for multi-tenant isolation
+- PII redaction at ingestion (Microsoft Presidio)
+- JWT authentication via Clerk
+- Webhook signature verification (HMAC-SHA256)
+- AI audit logging for every LLM decision
 
-## Cost Estimates (1000 meetings/month)
+## Cost Estimates (1,000 meetings/month)
 
 | Service | Monthly Cost |
 |---------|-------------|
@@ -250,8 +346,8 @@ See `infrastructure/k8s/` and `infrastructure/terraform/`
 
 ## License
 
-Proprietary - All rights reserved.
+Proprietary — All rights reserved.
 
-## Support
+## Author
 
-For issues and feature requests, please contact the engineering team.
+Built by [Shivam Kumar](https://github.com/shivam060404)
