@@ -303,8 +303,95 @@ class EntityResolutionAgent:
         """Parse deadline hint into ISO date.
         e.g., "by Friday" -> 2024-01-12 (if meeting was 2024-01-08)
         """
-        # This would use dateparser or similar
-        # For now, return None - implement with dateparser library
+        if not deadline_hint or not deadline_hint.strip():
+            return None
+        
+        from dateutil import parser as date_parser
+        from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR, SA, SU
+        from datetime import datetime, timedelta
+        import re
+        
+        try:
+            # Parse the meeting date as the reference point
+            try:
+                ref_date = date_parser.parse(meeting_date)
+            except (ValueError, TypeError):
+                ref_date = datetime.utcnow()
+            
+            hint = deadline_hint.lower().strip()
+            
+            # Map day names to dateutil weekday constants
+            day_map = {
+                "monday": MO, "tuesday": TU, "wednesday": WE,
+                "thursday": TH, "friday": FR, "saturday": SA, "sunday": SU,
+                "mon": MO, "tue": TU, "wed": WE, "thu": TH, "fri": FR, "sat": SA, "sun": SU,
+            }
+            
+            # Pattern: "by Friday", "next Friday", "this Friday"
+            for day_name, day_const in day_map.items():
+                if day_name in hint:
+                    # Find the next occurrence of that weekday
+                    target = ref_date + relativedelta(weekday=day_const(+1))
+                    # If it's the same day, push to next week
+                    if target.date() == ref_date.date():
+                        target = ref_date + relativedelta(weekday=day_const(+2))
+                    return target.date().isoformat()
+            
+            # Pattern: "next week"
+            if "next week" in hint:
+                target = ref_date + relativedelta(weeks=+1, weekday=FR)
+                return target.date().isoformat()
+            
+            # Pattern: "end of week"
+            if "end of week" in hint or "eow" in hint:
+                target = ref_date + relativedelta(weekday=FR(+1))
+                return target.date().isoformat()
+            
+            # Pattern: "end of month", "eom"
+            if "end of month" in hint or "eom" in hint:
+                target = ref_date + relativedelta(months=+1, day=1) - timedelta(days=1)
+                return target.date().isoformat()
+            
+            # Pattern: "end of quarter", "eoq", "end of Q1/Q2/Q3/Q4"
+            if "end of quarter" in hint or "eoq" in hint or re.search(r"end of q\d", hint):
+                month = ref_date.month
+                quarter_end_month = ((month - 1) // 3 + 1) * 3
+                target = ref_date.replace(month=quarter_end_month) + relativedelta(months=+1, day=1) - timedelta(days=1)
+                if target.date() <= ref_date.date():
+                    target = target + relativedelta(months=+3)
+                return target.date().isoformat()
+            
+            # Pattern: "in X days/weeks"
+            match = re.search(r"in\s+(\d+)\s+(day|week|month)s?", hint)
+            if match:
+                amount = int(match.group(1))
+                unit = match.group(2)
+                if unit == "day":
+                    target = ref_date + timedelta(days=amount)
+                elif unit == "week":
+                    target = ref_date + timedelta(weeks=amount)
+                elif unit == "month":
+                    target = ref_date + relativedelta(months=+amount)
+                return target.date().isoformat()
+            
+            # Pattern: "tomorrow"
+            if "tomorrow" in hint:
+                return (ref_date + timedelta(days=1)).date().isoformat()
+            
+            # Pattern: "today"
+            if "today" in hint:
+                return ref_date.date().isoformat()
+            
+            # Fallback: try to parse as an absolute date
+            try:
+                parsed = date_parser.parse(hint, fuzzy=True)
+                return parsed.date().isoformat()
+            except (ValueError, OverflowError):
+                pass
+            
+        except Exception as e:
+            logger.warning(f"Failed to resolve deadline '{deadline_hint}': {e}")
+        
         return None
 
 

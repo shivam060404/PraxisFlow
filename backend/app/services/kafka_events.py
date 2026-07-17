@@ -7,7 +7,9 @@ from aiokafka.errors import KafkaError
 
 from app.core.config import settings
 
-logger = None  # Will be initialized
+import logging
+
+logger = logging.getLogger(__name__)
 
 class KafkaEventBus:
     """Kafka event bus for async event-driven architecture."""

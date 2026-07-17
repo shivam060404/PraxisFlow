@@ -282,10 +282,35 @@ Judge this extraction."""),
 
 
 async def entity_resolution_node(state: ExtractionState) -> ExtractionState:
-    """Resolve assignees and deadlines."""
-    # This will be implemented with the EntityResolutionAgent
-    # For now, pass through
-    state.final_tasks = state.verified_tasks
+    """Resolve assignees and deadlines using EntityResolutionAgent."""
+    from app.agents.entity_resolution import EntityResolutionAgent
+    
+    agent = EntityResolutionAgent()
+    resolved_tasks = []
+    
+    try:
+        for task in state.verified_tasks:
+            if task.assignee_hint:
+                try:
+                    result = await agent.resolve_assignee(
+                        assignee_hint=task.assignee_hint,
+                        meeting_id=state.meeting_id,
+                        tenant_id=state.tenant_id,
+                    )
+                    if result.assignee_id and result.confidence >= settings.ENTITY_RESOLUTION_MIN_CONFIDENCE:
+                        logger.info(
+                            f"Resolved '{task.assignee_hint}' → {result.assignee_name} "
+                            f"(confidence={result.confidence:.2f}, method={result.method})"
+                        )
+                except Exception as e:
+                    logger.warning(f"Entity resolution failed for '{task.assignee_hint}': {e}")
+            
+            resolved_tasks.append(task)
+    finally:
+        await agent.close()
+    
+    state.final_tasks = resolved_tasks
+    logger.info(f"Entity resolution completed for {len(resolved_tasks)} tasks in meeting {state.meeting_id}")
     return state
 
 

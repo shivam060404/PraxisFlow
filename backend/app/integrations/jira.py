@@ -79,7 +79,7 @@ class JiraAdapter(IntegrationPort):
                 pass
             
             # Add due date if available
-            if task.deadline task.deadline_date:
+            if task.deadline_date:
                 payload["fields"]["duedate"] = task.deadline_date.strftime("%Y-%m-%d")
             
             response = await client.post("/rest/api/3/issue", json=payload)
@@ -691,15 +691,3 @@ class SlackAdapter(IntegrationPort):
             response.raise_for_status()
             data = response.json()
             return {"connected": data.get("ok"), "team": data.get("team")}
-
-
-# NormalizedWebhookEvent (defined in factory but also needed here)
-from pydantic import BaseModel
-from typing import Optional
-
-class NormalizedWebhookEvent(BaseModel):
-    external_id: str
-    external_url: str
-    status: str
-    changed_at: datetime
-    raw_payload: Dict[str, Any]

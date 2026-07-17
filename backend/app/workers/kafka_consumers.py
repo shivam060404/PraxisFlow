@@ -159,15 +159,72 @@ class KafkaConsumerManager:
         retry_failed_sync.delay(task_id, integration_id)
     
     async def handle_integration_webhook(self, event: Dict[str, Any]):
-        """Handle integration webhook."""
+        """Handle integration webhook — update task status from external system."""
         provider = event.get("provider")
         payload = event.get("payload")
         integration_id = event.get("integration_id")
         
         logger.info(f"Webhook received from {provider} for integration {integration_id}")
         
-        # Process webhook - this would call the webhook handler
-        # For now, log only
+        try:
+            from app.integrations.factory import IntegrationAdapterFactory
+            from app.db.prisma import get_prisma
+            
+            adapter = IntegrationAdapterFactory.get_adapter(provider)
+            
+            # Normalize webhook into a canonical event
+            normalized = adapter.normalize_webhook(payload)
+            
+            if not normalized.external_id:
+                logger.warning(f"Webhook from {provider} has no external_id, skipping")
+                return
+            
+            db = await get_prisma()
+            
+            # Find the task by external ID
+            task = await db.task.find_first(
+                where={
+                    "externalId": normalized.external_id,
+                    "integrationId": integration_id,
+                },
+            )
+            
+            if not task:
+                logger.warning(f"No task found for external_id={normalized.external_id}")
+                return
+            
+            # Map external status to internal status
+            status_map = {
+                "done": "COMPLETED",
+                "in_progress": "SYNCED",
+                "todo": "ASSIGNED",
+                "cancelled": "DISMISSED",
+            }
+            
+            new_status = status_map.get(normalized.status)
+            if new_status and new_status != task.status:
+                await db.task.update(
+                    where={"id": task.id},
+                    data={
+                        "status": new_status,
+                        "lastSyncedAt": normalized.changed_at,
+                    },
+                )
+                
+                await db.taskauditlog.create(
+                    data={
+                        "taskId": task.id,
+                        "previousStatus": task.status,
+                        "newStatus": new_status,
+                        "changedBy": f"webhook_{provider}",
+                        "reason": f"External status update from {provider}: {normalized.status}",
+                    }
+                )
+                
+                logger.info(f"Updated task {task.id} status to {new_status} from {provider} webhook")
+            
+        except Exception as e:
+            logger.error(f"Failed to process webhook from {provider}: {e}")
 
 
 # Global manager

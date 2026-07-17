@@ -125,40 +125,59 @@ async def _run_extraction_async(meeting_id: str):
     
     transcript = meeting.transcript
     
-    # Update status
+    # Update status to PROCESSING
     await db.meeting.update(
         where={"id": meeting_id},
-        data={"status": "EXTRACTED"},
+        data={"status": "PROCESSING"},
     )
     
-    # TODO: Implement LangGraph extraction pipeline
-    # For now, create placeholder tasks
+    # Build transcript chunks from utterances for the LangGraph pipeline
+    from app.agents.schemas import TranscriptChunk
+    from app.agents.graph_runner import run_extraction_pipeline
     
-    # Create a sample task
-    task = await db.task.create(
-        data={
-            "tenantId": meeting.tenantId,
-            "meetingId": meeting_id,
-            "title": "Review quarterly budget",
-            "description": "Review and approve Q1 budget allocations discussed in meeting",
-            "taskType": "ACTION_ITEM",
-            "status": "EXTRACTED",
-            "priority": "HIGH",
-            "assigneeHint": "Sarah from finance",
-            "deadlineHint": "by Friday",
-            "transcriptWordStart": 100,
-            "transcriptWordEnd": 150,
-            "sourceQuote": "Sarah, can you review the quarterly budget by Friday?",
-            "extractionConfidence": 0.85,
-            "verificationStatus": "PENDING",
-            "createdBy": "ai_agent",
-        }
+    transcript_chunks = []
+    if transcript.utterances:
+        for i, utt in enumerate(transcript.utterances):
+            transcript_chunks.append(TranscriptChunk(
+                index=i,
+                text=utt.text,
+                word_start=utt.wordStartIdx or 0,
+                word_end=utt.wordEndIdx or 0,
+                speakers=[utt.speakerLabel],
+            ))
+    else:
+        # Fallback: treat full text as a single chunk
+        words = transcript.fullText.split()
+        transcript_chunks.append(TranscriptChunk(
+            index=0,
+            text=transcript.fullText,
+            word_start=0,
+            word_end=len(words) - 1,
+            speakers=["Unknown"],
+        ))
+    
+    # Run the full LangGraph extraction pipeline
+    # This runs: chunking → extraction → dedup → verification → entity_resolution → persistence
+    final_state = await run_extraction_pipeline(
+        meeting_id=meeting_id,
+        tenant_id=meeting.tenantId,
+        meeting_context=f"Meeting: {meeting.title}",
+        transcript_chunks=transcript_chunks,
     )
     
-    # Queue verification
-    verify_task.delay(task.id)
+    # The persistence_node in the graph already creates Task records and
+    # updates the meeting status to EXTRACTED. Now queue verification
+    # for any tasks that need it.
+    tasks = await db.task.find_many(
+        where={"meetingId": meeting_id, "verificationStatus": "PENDING"},
+    )
+    for task in tasks:
+        verify_task.delay(task.id)
     
-    return {"tasks_created": 1, "meeting_id": meeting_id}
+    task_count = len(final_state.final_tasks) if final_state.final_tasks else 0
+    logger.info(f"Extraction pipeline created {task_count} tasks for meeting {meeting_id}")
+    
+    return {"tasks_created": task_count, "meeting_id": meeting_id}
 
 
 async def _mark_extraction_failed(meeting_id: str, error: str):
@@ -357,7 +376,7 @@ def sync_task_to_integrations(self, task_id: str):
 
 
 async def _sync_task_async(task_id: str):
-    """Async integration sync."""
+    """Async integration sync using adapter pattern."""
     db = await get_prisma()
     
     task = await db.task.find_unique(
@@ -373,40 +392,67 @@ async def _sync_task_async(task_id: str):
         where={"tenantId": task.tenantId, "status": "ACTIVE"},
     )
     
+    if not integrations:
+        logger.info(f"No active integrations for tenant {task.tenantId}, skipping sync")
+        return {"synced": 0, "results": []}
+    
+    from app.integrations.factory import IntegrationAdapterFactory
+    
     results = []
     
     for integration in integrations:
         try:
-            # TODO: Implement adapter pattern for each integration
-            # For now, just log
-            logger.info(f"Would sync task {task_id} to {integration.provider}")
+            adapter = IntegrationAdapterFactory.get_adapter(integration.provider)
             
-            # Update task with external ID (placeholder)
+            # Create task in external system
+            external_id = await adapter.create_task(integration, task)
+            
+            # Build external URL based on provider
+            external_url = ""
+            if integration.provider == "jira":
+                base_url = integration.config.get("base_url", "")
+                external_url = f"{base_url}/browse/{external_id}"
+            elif integration.provider == "linear":
+                external_url = f"https://linear.app/issue/{external_id}"
+            elif integration.provider == "asana":
+                external_url = f"https://app.asana.com/0/{external_id}"
+            
+            # Update task with real external ID
             await db.task.update(
                 where={"id": task_id},
                 data={
                     "integrationId": integration.id,
-                    "externalId": f"PLACEHOLDER-{task_id[:8]}",
+                    "externalId": external_id,
+                    "externalUrl": external_url,
                     "syncStatus": "SYNCED",
                     "lastSyncedAt": datetime.utcnow(),
                     "status": "SYNCED",
                 },
             )
             
+            logger.info(f"Synced task {task_id} to {integration.provider} as {external_id}")
+            
             results.append({
                 "integration": integration.provider,
                 "status": "synced",
+                "external_id": external_id,
             })
             
         except Exception as e:
             logger.error(f"Failed to sync to {integration.provider}: {e}")
+            
+            await db.task.update(
+                where={"id": task_id},
+                data={"syncStatus": "SYNC_FAILED"},
+            )
+            
             results.append({
                 "integration": integration.provider,
                 "status": "failed",
                 "error": str(e),
             })
     
-    return {"synced": len(results), "results": results}
+    return {"synced": len([r for r in results if r["status"] == "synced"]), "results": results}
 
 
 async def _mark_sync_failed(task_id: str, error: str):

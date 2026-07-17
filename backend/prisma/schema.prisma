@@ -111,7 +111,7 @@ model Transcript {
   language     String   @default("en")
   wordCount    Int      @default(0)
   durationMs   Int      @default(0)
-  processedAt  DateTime      DateTime @default(now())
+  processedAt  DateTime @default(now())
   redactionApplied Boolean @default(false)
 
   meeting  Meeting    @relation(fields: [meetingId], references: [id], onDelete: Cascade)
@@ -208,6 +208,8 @@ enum TaskStatus {
   VERIFIED
   ASSIGNED
   SYNCED
+  SYNC_FAILED
+  CONFLICT
   COMPLETED
   DISMISSED
 }

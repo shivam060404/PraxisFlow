@@ -185,7 +185,7 @@ async def delete_meeting(
     db=Depends(get_db),
 ):
     """Delete a meeting."""
-    meeting = await db.meeting.find_unique(where={"id=str(meeting_id))
+    meeting = await db.meeting.find_unique(where={"id": str(meeting_id)})
     if not meeting:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
