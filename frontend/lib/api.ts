@@ -9,7 +9,7 @@ class ApiClient {
   constructor() {
     this.client = axios.create({
       baseURL: `${API_URL}/api/v1`,
-      timeout: 30000,
+      timeout: 60000,
       headers: {
         "Content-Type": "application/json",
       },
@@ -34,7 +34,6 @@ class ApiClient {
       (response) => response,
       (error: AxiosError) => {
         if (error.response?.status === 401) {
-          // Handle unauthorized - redirect to sign in
           if (typeof window !== "undefined") {
             window.location.href = "/sign-in";
           }
@@ -44,7 +43,20 @@ class ApiClient {
     );
   }
 
-  // Meetings
+  // ─── Health ───
+  async healthCheck() {
+    return this.client.get("/health");
+  }
+
+  async readinessCheck() {
+    return this.client.get("/ready");
+  }
+
+  async livenessCheck() {
+    return this.client.get("/live");
+  }
+
+  // ─── Meetings ───
   async getMeetings(params?: {
     page?: number;
     page_size?: number;
@@ -75,7 +87,11 @@ class ApiClient {
     return this.client.post(`/meetings/${id}/process`);
   }
 
-  // Tasks
+  async getMeetingStatus(id: string) {
+    return this.client.get(`/meetings/${id}/status`);
+  }
+
+  // ─── Tasks ───
   async getTasks(params?: {
     page?: number;
     page_size?: number;
@@ -84,6 +100,7 @@ class ApiClient {
     status?: string;
     task_type?: string;
     priority?: string;
+    search?: string;
   }) {
     return this.client.get("/tasks", { params });
   }
@@ -119,15 +136,65 @@ class ApiClient {
     return this.client.get(`/tasks/${id}/audit-log`);
   }
 
+  async getTaskSourceQuote(id: string, word_start: number, word_end: number) {
+    return this.client.get(`/tasks/${id}/source-quote`, {
+      params: { word_start, word_end },
+    });
+  }
+
+  async syncTaskToIntegration(id: string, integration_id: string) {
+    return this.client.post(`/tasks/${id}/sync`, { integration_id });
+  }
+
+  // ─── Users ───
   async getUsers() {
     return this.client.get("/users");
   }
 
+  async getUser(id: string) {
+    return this.client.get(`/users/${id}`);
+  }
+
+  async updateUser(id: string, data: Partial<User>) {
+    return this.client.patch(`/users/${id}`, data);
+  }
+
+  // ─── Metrics & Analytics ───
   async getMetrics() {
     return this.client.get("/metrics");
   }
 
-  // Transcripts
+  async getDashboardMetrics() {
+    return this.client.get("/metrics/dashboard");
+  }
+
+  async getTeamMetrics() {
+    return this.client.get("/metrics/team");
+  }
+
+  async getExtractionAccuracy(params?: {
+    start_date?: string;
+    end_date?: string;
+  }) {
+    return this.client.get("/metrics/extraction-accuracy", { params });
+  }
+
+  async getPipelinePerformance(params?: {
+    start_date?: string;
+    end_date?: string;
+  }) {
+    return this.client.get("/metrics/pipeline-performance", { params });
+  }
+
+  async getCostAnalytics(params?: {
+    start_date?: string;
+    end_date?: string;
+    group_by?: "model" | "pipeline_node" | "tenant";
+  }) {
+    return this.client.get("/metrics/cost", { params });
+  }
+
+  // ─── Transcripts ───
   async getTranscript(meetingId: string) {
     return this.client.get(`/transcripts/meeting/${meetingId}`);
   }
@@ -169,7 +236,11 @@ class ApiClient {
     });
   }
 
-  // Integrations
+  async getTranscriptStats(transcriptId: string) {
+    return this.client.get(`/transcripts/${transcriptId}/stats`);
+  }
+
+  // ─── Integrations ───
   async getIntegrations() {
     return this.client.get("/integrations");
   }
@@ -194,13 +265,182 @@ class ApiClient {
     return this.client.post(`/integrations/${id}/test`);
   }
 
-  // Health
-  async healthCheck() {
-    return this.client.get("/health");
+  async triggerIntegrationSync(id: string) {
+    return this.client.post(`/integrations/${id}/sync`);
+  }
+
+  async getIntegrationHealth(id: string) {
+    return this.client.get(`/integrations/${id}/health`);
+  }
+
+  // ─── WebSocket ───
+  createWebSocket(tenantId: string): WebSocket {
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+    const token = typeof window !== "undefined" ? localStorage.getItem("clerk_token") : "";
+    return new WebSocket(`${wsUrl}/api/v1/ws?token=${token}&tenant_id=${tenantId}`);
+  }
+
+  // ─── Admin (Tenant Management) ───
+  async getTenant() {
+    return this.client.get("/admin/tenant");
+  }
+
+  async updateTenant(data: TenantSettingsUpdate) {
+    return this.client.patch("/admin/tenant", data);
+  }
+
+  async getTenantUsage() {
+    return this.client.get("/admin/tenant/usage");
+  }
+
+  async getTenantUsers(params?: {
+    page?: number;
+    page_size?: number;
+    role?: string;
+    status?: string;
+    search?: string;
+  }) {
+    return this.client.get("/admin/users", { params });
+  }
+
+  async inviteUser(data: UserInvite) {
+    return this.client.post("/admin/users/invite", data);
+  }
+
+  async updateUser(id: string, data: Partial<User>) {
+    return this.client.patch(`/admin/users/${id}`, data);
+  }
+
+  async bulkUserAction(data: BulkUserAction) {
+    return this.client.post("/admin/users/bulk", data);
+  }
+
+  async getAdminIntegrations() {
+    return this.client.get("/admin/integrations");
+  }
+
+  async createAdminIntegration(data: AdminIntegrationCreate) {
+    return this.client.post("/admin/integrations", data);
+  }
+
+  async updateAdminIntegration(id: string, data: AdminIntegrationUpdate) {
+    return this.client.patch(`/admin/integrations/${id}`, data);
+  }
+
+  async deleteAdminIntegration(id: string) {
+    return this.client.delete(`/admin/integrations/${id}`);
+  }
+
+  async testAdminIntegration(id: string) {
+    return this.client.post(`/admin/integrations/${id}/test`);
+  }
+
+  async triggerAdminSync(id: string) {
+    return this.client.post(`/admin/integrations/${id}/sync`);
+  }
+
+  async getAdminAuditLogs(params?: {
+    page?: number;
+    page_size?: number;
+    start_date?: string;
+    end_date?: string;
+    action?: string;
+    user_id?: string;
+  }) {
+    return this.client.get("/admin/audit-logs", { params });
+  }
+
+  async getAdminComplianceStatus() {
+    return this.client.get("/admin/compliance/status");
+  }
+
+  async getAdminSystemHealth() {
+    return this.client.get("/admin/system/health");
+  }
+
+  async getAdminSystemMetrics() {
+    return this.client.get("/admin/system/metrics");
+  }
+
+  // ─── Compliance ───
+  async createDataSubjectRequest(data: DataSubjectRequestCreate) {
+    return this.client.post("/compliance/data-subject-requests", data);
+  }
+
+  async getDataSubjectRequests(params?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    return this.client.get("/compliance/data-subject-requests", { params });
+  }
+
+  async getDataSubjectRequest(id: string) {
+    return this.client.get(`/compliance/data-subject-requests/${id}`);
+  }
+
+  async processDataSubjectRequest(id: string) {
+    return this.client.post(`/compliance/data-subject-requests/${id}/process`);
+  }
+
+  async exportTenantData(data: ComplianceExportRequest) {
+    return this.client.post("/compliance/export", data);
+  }
+
+  async getExportStatus(exportId: string) {
+    return this.client.get(`/compliance/exports/${exportId}`);
+  }
+
+  async eraseTenantData(confirmation: string) {
+    return this.client.post("/compliance/erase-tenant", { confirmation });
+  }
+
+  async getAIAuditLogs(params?: {
+    meeting_id?: string;
+    task_id?: string;
+    pipeline_node?: string;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    return this.client.get("/compliance/ai-audit-logs", { params });
+  }
+
+  async getEUAIActStatus() {
+    return this.client.get("/compliance/eu-ai-act");
+  }
+
+  async getGDPRStatus() {
+    return this.client.get("/compliance/gdpr");
+  }
+
+  async getModelCards() {
+    return this.client.get("/compliance/model-cards");
+  }
+
+  // ─── Webhooks ───
+  async registerWebhook(data: WebhookRegistration) {
+    return this.client.post("/webhooks/register", data);
+  }
+
+  async unregisterWebhook(provider: string) {
+    return this.client.delete(`/webhooks/${provider}`);
+  }
+
+  async testWebhook(provider: string) {
+    return this.client.get(`/webhooks/${provider}/test`);
+  }
+
+  async getWebhookLogs(provider: string, params?: {
+    page?: number;
+    page_size?: number;
+  }) {
+    return this.client.get(`/webhooks/${provider}/logs`, { params });
   }
 }
 
-// Types
+// ─── Types ───
 export interface Meeting {
   id: string;
   tenant_id: string;
@@ -241,6 +481,11 @@ export interface User {
   clerk_user_id?: string;
   created_at: string;
   updated_at: string;
+  department?: string;
+  team?: string;
+  clearance_level?: string;
+  is_active?: boolean;
+  last_login?: string;
 }
 
 export interface Transcript {
@@ -334,12 +579,131 @@ export interface IntegrationCreate {
   webhook_secret?: string;
 }
 
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
-  page: number;
-  page_size: number;
-  total_pages: number;
+// Admin Types
+export interface TenantSettingsUpdate {
+  name?: string;
+  plan?: string;
+  status?: string;
+  settings?: Record<string, unknown>;
+}
+
+export interface UserInvite {
+  email: string;
+  full_name: string;
+  role: "tenant_admin" | "team_lead" | "member" | "viewer" | "api_service";
+  department?: string;
+  team?: string;
+}
+
+export interface BulkUserAction {
+  user_ids: string[];
+  action: "activate" | "deactivate" | "delete" | "change_role";
+  role?: "tenant_admin" | "team_lead" | "member" | "viewer" | "api_service";
+}
+
+export interface AdminIntegrationCreate {
+  provider: string;
+  display_name: string;
+  config: Record<string, unknown>;
+  webhook_secret?: string;
+}
+
+export interface AdminIntegrationUpdate {
+  config: Record<string, unknown>;
+  webhook_secret?: string;
+}
+
+// Compliance Types
+export type DataSubjectRequestType =
+  | "access"
+  | "rectification"
+  | "erasure"
+  | "restriction"
+  | "portability"
+  | "objection";
+
+export type DataSubjectRequestStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "rejected"
+  | "extended";
+
+export interface DataSubjectRequestCreate {
+  request_type: DataSubjectRequestType;
+  data_subject_email: string;
+  reason?: string;
+  specific_data_categories?: string[];
+}
+
+export interface DataSubjectRequestResponse {
+  id: string;
+  request_type: DataSubjectRequestType;
+  data_subject_email: string;
+  status: DataSubjectRequestStatus;
+  reason?: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+  response_data?: Record<string, unknown>;
+}
+
+export interface ComplianceExportRequest {
+  format: "json" | "csv" | "pdf";
+  include_audit_logs: boolean;
+  include_ai_decisions: boolean;
+  date_from?: string;
+  date_to?: string;
+}
+
+export interface AiAuditLogEntry {
+  id: string;
+  timestamp: string;
+  decision_type: string;
+  model: string;
+  pipeline_node: string;
+  input_hash: string;
+  output_summary: string;
+  verification_result?: Record<string, unknown>;
+  guardrail_actions: string[];
+  confidence_score?: number;
+  latency_ms: number;
+  cost_usd: number;
+}
+
+export interface EUAIActComplianceStatus {
+  risk_management_system: boolean;
+  data_governance: boolean;
+  technical_documentation: boolean;
+  record_keeping: boolean;
+  transparency: boolean;
+  human_oversight: boolean;
+  accuracy_robustness: boolean;
+  cybersecurity: boolean;
+  overall_compliant: boolean;
+  last_assessment: string;
+  next_assessment: string;
+}
+
+export interface GDPRComplianceStatus {
+  lawful_basis_documented: boolean;
+  dpia_completed: boolean;
+  dpia_last_reviewed?: string;
+  data_processing_agreements: boolean;
+  dpa_last_reviewed?: string;
+  data_subject_rights_process: boolean;
+  breach_notification_process: boolean;
+  data_retention_policy: boolean;
+  cross_border_transfers: boolean;
+  sccs_in_place: boolean;
+  overall_compliant: boolean;
+}
+
+export interface WebhookRegistration {
+  provider: string;
+  url: string;
+  events: string[];
+  secret?: string;
 }
 
 export const api = new ApiClient();

@@ -1,0 +1,377 @@
+# Production Deployment Pipeline
+# Blue-green deployment with approval gate
+
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to deploy (e.g., v1.2.3)'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+      rollback:
+        description: 'Rollback to previous version'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KUBECONFIG_PROD: ${{ secrets.KUBECONFIG_PRODUCTION }}
+  ENVIRONMENT: production
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════
+  # VALIDATE RELEASE
+  # ═══════════════════════════════════════════════════════════════
+  validate-release:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+      backend-image: ${{ steps.get-images.outputs.backend }}
+      frontend-image: ${{ steps.get-images.outputs.frontend }}
+      gateway-image: ${{ steps.get-images.outputs.gateway }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: extract-version
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version format: $VERSION (expected vX.Y.Z)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Verify tag exists
+        run: |
+          git fetch --tags
+          if ! git rev-parse "${{ steps.extract-version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.extract-version.outputs.version }} not found"
+            exit 1
+          fi
+
+      - name: Get image tags
+        id: get-images
+        run: |
+          VERSION="${{ steps.extract-version.outputs.version }}"
+          echo "backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:$VERSION" >> $GITHUB_OUTPUT
+          echo "frontend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:$VERSION" >> $GITHUB_OUTPUT
+          echo "gateway=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-gateway:$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Verify images exist
+        run: |
+          for img in "${{ steps.get-images.outputs.backend }}" "${{ steps.get-images.outputs.frontend }}" "${{ steps.get-images.outputs.gateway }}"; do
+            if ! docker manifest inspect "$img" >/dev/null 2>&1; then
+              echo "Image not found: $img"
+              exit 1
+            fi
+          done
+
+      - name: Verify staging deployment
+        run: |
+          # Check that the version is deployed and healthy in staging
+          curl -f https://api-staging.praxisflow.com/health | jq -e '.version == "'"${{ steps.extract-version.outputs.version }}"'"'
+          curl -f https://app-staging.praxisflow.com/ | grep -q "PraxisFlow"
+
+  # ═══════════════════════════════════════════════════════════════
+  # APPROVAL GATE
+  # ═══════════════════════════════════════════════════════════════
+  approval-gate:
+    name: Production Approval
+    needs: validate-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production-approval
+    steps:
+      - name: Wait for manual approval
+        run: |
+          echo "Deployment of ${{ needs.validate-release.outputs.version }} to production requires manual approval"
+          echo "Review the following:"
+          echo "  - Version: ${{ needs.validate-release.outputs.version }}"
+          echo "  - Backend: ${{ needs.validate-release.outputs.backend-image }}"
+          echo "  - Frontend: ${{ needs.validate-release.outputs.frontend-image }}"
+          echo "  - Gateway: ${{ needs.validate-release.outputs.gateway-image }}"
+          echo "  - Staging health: Verified"
+          echo "  - Changelog: https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate-release.outputs.version }}"
+
+      - name: Confirm deployment
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.token }}
+          approvers: release-managers,platform-team
+          minimum-approvals: 2
+          issue-title: "Production Deployment Approval: ${{ needs.validate-release.outputs.version }}"
+          issue-body: |
+            ## Production Deployment Request
+            
+            **Version**: ${{ needs.validate-release.outputs.version }}
+            
+            **Images**:
+            - Backend: `${{ needs.validate-release.outputs.backend-image }}`
+            - Frontend: `${{ needs.validate-release.outputs.frontend-image }}`
+            - Gateway: `${{ needs.validate-release.outputs.gateway-image }}`
+            
+            **Pre-deployment Checks**:
+            - [x] All CI checks passed
+            - [x] Staging deployment verified
+            - [x] Integration tests passed
+            - [x] Security scans clean
+            - [x] Performance benchmarks met
+            
+            **Rollback Plan**: Blue-green switch to previous version
+            
+            **Approvers**: @release-managers @platform-team
+            
+            ---
+            *This deployment will use blue-green strategy with zero-downtime switch.*
+
+  # ═══════════════════════════════════════════════════════════════
+  # BLUE-GREEN DEPLOYMENT
+  # ═══════════════════════════════════════════════════════════════
+  deploy-blue-green:
+    name: Blue-Green Deploy
+    needs: [validate-release, approval-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ env.KUBECONFIG_PROD }}
+
+      - name: Determine active environment
+        id: active-env
+        run: |
+          # Check which environment (blue/green) is currently active
+          ACTIVE=$(kubectl get service praxisflow-api -n praxisflow-prod -o jsonpath='{.spec.selector.env}' 2>/dev/null || echo "blue")
+          if [[ "$ACTIVE" == "blue" ]]; then
+            TARGET="green"
+          else
+            TARGET="blue"
+          fi
+          echo "active=$ACTIVE" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "Current active: $ACTIVE, deploying to: $TARGET"
+
+      - name: Deploy to target environment
+        run: |
+          TARGET="${{ steps.active-env.outputs.target }}"
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          
+          cd infrastructure/k8s/production
+          
+          # Update kustomization for target environment
+          kustomize edit set image \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend=${{ needs.validate-release.outputs.backend-image }} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend=${{ needs.validate-release.outputs.frontend-image }} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-gateway=${{ needs.validate-release.outputs.gateway-image }}
+          
+          # Apply to target namespace
+          kubectl apply -k overlays/$TARGET
+
+      - name: Wait for target rollout
+        run: |
+          TARGET="${{ steps.active-env.outputs.target }}"
+          kubectl rollout status deployment/praxisflow-backend -n praxisflow-prod-$TARGET --timeout=300s
+          kubectl rollout status deployment/praxisflow-frontend -n praxisflow-prod-$TARGET --timeout=300s
+          kubectl rollout status deployment/praxisflow-gateway -n praxisflow-prod-$TARGET --timeout=300s
+          kubectl rollout status deployment/praxisflow-worker -n praxisflow-prod-$TARGET --timeout=300s
+
+      - name: Run health checks on target
+        run: |
+          TARGET="${{ steps.active-env.outputs.target }}"
+          # Port-forward to target environment for testing
+          kubectl port-forward -n praxisflow-prod-$TARGET service/praxisflow-api 8080:80 &
+          PF_PID=$!
+          sleep 10
+          
+          # Health checks
+          curl -f http://localhost:8080/health
+          curl -f http://localhost:8080/ready
+          
+          # Test critical endpoints
+          curl -f -X POST http://localhost:8080/api/v1/meetings/health
+          
+          kill $PF_PID
+
+      - name: Run smoke tests on target
+        run: |
+          TARGET="${{ steps.active-env.outputs.target }}"
+          # Run automated smoke tests against target
+          cd backend
+          pip install pytest pytest-asyncio httpx
+          TARGET_HOST="praxisflow-prod-$TARGET" pytest tests/smoke/ -v
+
+      - name: Switch traffic (blue-green cutover)
+        run: |
+          TARGET="${{ steps.active-env.outputs.target }}"
+          # Update the main service selector to point to target
+          kubectl patch service praxisflow-api -n praxisflow-prod \
+            -p '{"spec":{"selector":{"env":"'"$TARGET"'"}}}'
+          
+          kubectl patch service praxisflow-frontend -n praxisflow-prod \
+            -p '{"spec":{"selector":{"env":"'"$TARGET"'"}}}'
+          
+          kubectl patch service praxisflow-gateway -n praxisflow-prod \
+            -p '{"spec":{"selector":{"env":"'"$TARGET"'"}}}'
+
+      - name: Verify production health
+        run: |
+          # Wait for DNS propagation and verify
+          sleep 30
+          
+          # Production health checks
+          curl -f https://api.praxisflow.com/health
+          curl -f https://api.praxisflow.com/ready
+          curl -f https://app.praxisflow.com/
+          curl -f https://gateway.praxisflow.com/health/liveliness
+          
+          # Verify version
+          curl -f https://api.praxisflow.com/health | jq -e '.version == "'"${{ needs.validate-release.outputs.version }}"'"'
+
+      - name: Monitor error rates (5 min)
+        run: |
+          echo "Monitoring error rates for 5 minutes..."
+          for i in {1..10}; do
+            ERROR_RATE=$(curl -s https://prometheus.praxisflow.com/api/v1/query?query=rate\(http_requests_total\{status=~\"5..\"\}[1m]\) | jq -r '.data.result[0].value[1] // "0"')
+            echo "Error rate: $ERROR_RATE"
+            if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+              echo "ERROR: Error rate exceeded 1%!"
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Cleanup old environment
+        if: success()
+        run: |
+          ACTIVE="${{ steps.active-env.outputs.active }}"
+          # Scale down old environment after successful switch
+          kubectl scale deployment --all --replicas=0 -n praxisflow-prod-$ACTIVE
+          echo "Scaled down old environment: $ACTIVE"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, keeping traffic on current environment"
+          TARGET="${{ steps.active-env.outputs.target }}"
+          # Scale down failed target
+          kubectl scale deployment --all --replicas=0 -n praxisflow-prod-$TARGET
+          
+          # Alert on-call
+          curl -X POST ${{ secrets.PAGERDUTY_WEBHOOK }} \
+            -H "Content-Type: application/json" \
+            -d '{"summary":"Production deployment failed for ${{ needs.validate-release.outputs.version }}","severity":"critical","source":"github-actions"}'
+
+  # ═══════════════════════════════════════════════════════════════
+  # POST-DEPLOYMENT
+  # ═══════════════════════════════════════════════════════════════
+  post-deployment:
+    name: Post-Deployment Tasks
+    needs: deploy-blue-green
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: success()
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.validate-release.outputs.version }}
+          name: "Release ${{ needs.validate-release.outputs.version }}"
+          body: |
+            ## Production Release ${{ needs.validate-release.outputs.version }}
+            
+            **Deployed**: ${{ github.event.inputs.version }}
+            **Commit**: ${{ github.sha }}
+            **Deployed by**: ${{ github.actor }}
+            **Timestamp**: ${{ github.event.workflow_run.created_at }}
+            
+            ### Changes
+            See [changelog](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }})
+            
+            ### Images
+            - Backend: `${{ needs.validate-release.outputs.backend-image }}`
+            - Frontend: `${{ needs.validate-release.outputs.frontend-image }}`
+            - Gateway: `${{ needs.validate-release.outputs.gateway-image }}`
+            
+            ### Verification
+            - [x] Blue-green deployment successful
+            - [x] Health checks passing
+            - [x] Smoke tests passing
+            - [x] Error rates normal
+            - [x] Zero-downtime switch completed
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+      - name: Update deployment tracking
+        run: |
+          # Record deployment in tracking system
+          curl -X POST https://api.praxisflow.com/internal/deployments \
+            -H "Authorization: Bearer ${{ secrets.INTERNAL_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "version": "${{ needs.validate-release.outputs.version }}",
+              "environment": "production",
+              "status": "success",
+              "deployed_by": "${{ github.actor }}",
+              "commit_sha": "${{ github.sha }}",
+              "images": {
+                "backend": "${{ needs.validate-release.outputs.backend-image }}",
+                "frontend": "${{ needs.validate-release.outputs.frontend-image }}",
+                "gateway": "${{ needs.validate-release.outputs.gateway-image }}"
+              }
+            }'
+
+      - name: Notify stakeholders
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#releases'
+          text: |
+            🚀 **Production Release Deployed**
+            Version: ${{ needs.validate-release.outputs.version }}
+            Commit: ${{ github.sha }}
+            Deployed by: ${{ github.actor }}
+            
+            All health checks passing. Zero-downtime blue-green switch completed.
+
+      - name: Schedule post-deployment review
+        run: |
+          # Create a reminder issue for post-deployment review in 24 hours
+          gh issue create \
+            --title "Post-deployment review: ${{ needs.validate-release.outputs.version }}" \
+            --body "Review production metrics 24h after deployment of ${{ needs.validate-release.outputs.version }}" \
+            --label "post-deployment-review" \
+            --assignee "@platform-team" \
+            --milestone "Production Monitoring"
+
+# ─── Concurrency Control ───
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false

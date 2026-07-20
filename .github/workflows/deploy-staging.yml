@@ -1,0 +1,202 @@
+# Staging Deployment Pipeline
+# Deploys to staging environment on merge to main/develop
+
+name: Deploy Staging
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KUBECONFIG_STAGING: ${{ secrets.KUBECONFIG_STAGING }}
+  ENVIRONMENT: staging
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      backend-image: ${{ steps.meta-backend.outputs.tags }}
+      frontend-image: ${{ steps.meta-frontend.outputs.tags }}
+      gateway-image: ${{ steps.meta-gateway.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Backend Image ───
+      - name: Extract metadata (backend)
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      # ─── Frontend Image ───
+      - name: Extract metadata (frontend)
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=https://api-staging.praxisflow.com
+            NEXT_PUBLIC_WS_URL=wss://api-staging.praxisflow.com
+            BUILDKIT_INLINE_CACHE=1
+
+      # ─── LLM Gateway Image ───
+      - name: Extract metadata (gateway)
+        id: meta-gateway
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-gateway
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=${{ github.sha }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push gateway
+        uses: docker/build-push-action@v5
+        with:
+          context: ./llm-gateway
+          file: ./llm-gateway/Dockerfile
+          push: true
+          tags: ${{ steps.meta-gateway.outputs.tags }}
+          labels: ${{ steps.meta-gateway.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ env.KUBECONFIG_STAGING }}
+
+      - name: Update image tags in kustomization
+        run: |
+          cd infrastructure/k8s/staging
+          kustomize edit set image \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend=${{ needs.build-and-push.outputs.backend-image }} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend=${{ needs.build-and-push.outputs.frontend-image }} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-gateway=${{ needs.build-and-push.outputs.gateway-image }}
+
+      - name: Apply Kubernetes manifests
+        run: |
+          cd infrastructure/k8s/staging
+          kubectl apply -k .
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/praxisflow-backend -n praxisflow-staging --timeout=300s
+          kubectl rollout status deployment/praxisflow-frontend -n praxisflow-staging --timeout=300s
+          kubectl rollout status deployment/praxisflow-gateway -n praxisflow-staging --timeout=300s
+          kubectl rollout status deployment/praxisflow-worker -n praxisflow-staging --timeout=300s
+
+      - name: Run smoke tests
+        run: |
+          # Wait for services to be ready
+          sleep 30
+          
+          # Health checks
+          curl -f https://api-staging.praxisflow.com/health
+          curl -f https://app-staging.praxisflow.com/
+          curl -f https://gateway-staging.praxisflow.com/health/liveliness
+
+      - name: Run integration tests
+        run: |
+          # Run post-deployment integration tests
+          cd backend
+          pip install pytest pytest-asyncio httpx
+          pytest tests/integration/test_staging.py -v
+
+      - name: Notify Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          text: 'Staging deployment ${{ job.status }} for ${{ github.sha }}'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Cleanup old images
+        if: always()
+        run: |
+          # Keep only last 10 images per repo
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            ghcr.io/actions/cleanup-images:latest \
+            --registry ${{ env.REGISTRY }} \
+            --repository ${{ env.IMAGE_NAME }}-backend \
+            --keep 10
+          # Repeat for frontend and gateway...

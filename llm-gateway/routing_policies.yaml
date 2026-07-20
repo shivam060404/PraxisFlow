@@ -1,0 +1,393 @@
+# LLM Gateway Routing Policies
+# Defines model routing, fallback chains, and per-task configurations
+# Version: 2.0
+
+policies:
+  # ─── Extraction Pipeline (Main Task) ───
+  extraction_pipeline:
+    description: "Primary task extraction from meeting transcripts"
+    primary:
+      model: "groq/llama-3.3-70b-versatile"
+      provider: "groq"
+      max_tokens: 4096
+      temperature: 0.1
+      top_p: 0.9
+      timeout_ms: 30000
+      max_retries: 2
+      retry_delay_ms: 1000
+    fallback_chain:
+      - model: "openai/gpt-4o"
+        provider: "openai"
+        max_tokens: 4096
+        temperature: 0.1
+        timeout_ms: 30000
+        max_retries: 1
+      - model: "anthropic/claude-sonnet-4-20250514"
+        provider: "anthropic"
+        max_tokens: 4096
+        temperature: 0.1
+        timeout_ms: 30000
+        max_retries: 1
+    routing_rules:
+      - condition: "token_count > 8000"
+        action: "use_fallback"
+        target: "openai/gpt-4o"
+      - condition: "tenant_tier == 'enterprise'"
+        action: "prefer_primary"
+      - condition: "cost_optimization == true"
+        action: "use_cheapest_available"
+    cost_optimization:
+      enabled: true
+      max_cost_per_request_usd: 0.05
+      prefer_cheaper_after_retries: 2
+    semantic_cache:
+      enabled: true
+      similarity_threshold: 0.95
+      ttl_seconds: 3600
+      namespace: "extraction"
+    budget:
+      tenant_limit_tokens_per_month: 2000000
+      user_limit_tokens_per_month: 500000
+      pipeline_limit_tokens_per_month: 1000000
+      soft_limit_percent: 80
+      hard_limit_percent: 100
+      emergency_limit_percent: 120
+
+  # ─── Verification Node (Anti-Hallucination) ───
+  verification_node:
+    description: "Verify extracted tasks against source transcript"
+    primary:
+      model: "openai/gpt-4o"
+      provider: "openai"
+      max_tokens: 2048
+      temperature: 0.0
+      top_p: 1.0
+      timeout_ms: 20000
+      max_retries: 2
+      retry_delay_ms: 1000
+    fallback_chain:
+      - model: "anthropic/claude-sonnet-4-20250514"
+        provider: "anthropic"
+        max_tokens: 2048
+        temperature: 0.0
+        timeout_ms: 20000
+        max_retries: 1
+    routing_rules:
+      - condition: "verification_batch_size > 10"
+        action: "batch_process"
+        target: "openai/gpt-4o-mini"
+    semantic_cache:
+      enabled: true
+      similarity_threshold: 0.98
+      ttl_seconds: 7200
+      namespace: "verification"
+    budget:
+      tenant_limit_tokens_per_month: 500000
+      user_limit_tokens_per_month: 100000
+
+  # ─── Entity Resolution (Assignee/Deadline) ───
+  entity_resolution:
+    description: "Resolve assignee hints and deadline parsing"
+    primary:
+      model: "groq/llama-3.3-70b-versatile"
+      provider: "groq"
+      max_tokens: 1024
+      temperature: 0.0
+      top_p: 1.0
+      timeout_ms: 15000
+      max_retries: 2
+    fallback_chain:
+      - model: "openai/gpt-4o-mini"
+        provider: "openai"
+        max_tokens: 1024
+        temperature: 0.0
+        timeout_ms: 15000
+        max_retries: 1
+    routing_rules:
+      - condition: "simple_name_resolution == true"
+        action: "use_cheapest"
+        target: "openai/gpt-4o-mini"
+    semantic_cache:
+      enabled: true
+      similarity_threshold: 0.90
+      ttl_seconds: 86400
+      namespace: "entity_resolution"
+    budget:
+      tenant_limit_tokens_per_month: 200000
+      user_limit_tokens_per_month: 50000
+
+  # ─── Embeddings (Vector Search) ───
+  embedding:
+    description: "Generate embeddings for semantic search and deduplication"
+    primary:
+      model: "openai/text-embedding-3-large"
+      provider: "openai"
+      dimensions: 3072
+      timeout_ms: 10000
+      max_retries: 3
+    fallback_chain:
+      - model: "cohere/embed-v3"
+        provider: "cohere"
+        dimensions: 1024
+        timeout_ms: 10000
+        max_retries: 2
+    routing_rules:
+      - condition: "batch_size > 100"
+        action: "use_batch_api"
+    budget:
+      tenant_limit_tokens_per_month: 1000000
+      user_limit_tokens_per_month: 200000
+
+  # ─── Summarization (Meeting Summary) ───
+  summarization:
+    description: "Generate meeting summaries and key topics"
+    primary:
+      model: "groq/llama-3.3-70b-versatile"
+      provider: "groq"
+      max_tokens: 2048
+      temperature: 0.3
+      top_p: 0.9
+      timeout_ms: 30000
+      max_retries: 2
+    fallback_chain:
+      - model: "openai/gpt-4o-mini"
+        provider: "openai"
+        max_tokens: 2048
+        temperature: 0.3
+        timeout_ms: 30000
+        max_retries: 1
+    semantic_cache:
+      enabled: true
+      similarity_threshold: 0.92
+      ttl_seconds: 86400
+      namespace: "summarization"
+    budget:
+      tenant_limit_tokens_per_month: 500000
+      user_limit_tokens_per_month: 100000
+
+  # ─── Classification (Task Type, Priority) ───
+  classification:
+    description: "Classify task type, priority, urgency"
+    primary:
+      model: "openai/gpt-4o-mini"
+      provider: "openai"
+      max_tokens: 512
+      temperature: 0.0
+      timeout_ms: 10000
+      max_retries: 2
+    fallback_chain:
+      - model: "groq/llama-3.3-70b-versatile"
+        provider: "groq"
+        max_tokens: 512
+        temperature: 0.0
+        timeout_ms: 10000
+        max_retries: 1
+    semantic_cache:
+      enabled: true
+      similarity_threshold: 0.95
+      ttl_seconds: 86400
+      namespace: "classification"
+    budget:
+      tenant_limit_tokens_per_month: 100000
+      user_limit_tokens_per_month: 20000
+
+  # ─── Conflict Resolution (Cross-chunk) ───
+  conflict_resolution:
+    description: "Resolve conflicting extractions from different chunks"
+    primary:
+      model: "openai/gpt-4o"
+      provider: "openai"
+      max_tokens: 2048
+      temperature: 0.1
+      timeout_ms: 30000
+      max_retries: 2
+    fallback_chain:
+      - model: "anthropic/claude-sonnet-4-20250514"
+        provider: "anthropic"
+        max_tokens: 2048
+        temperature: 0.1
+        timeout_ms: 30000
+        max_retries: 1
+    budget:
+      tenant_limit_tokens_per_month: 300000
+      user_limit_tokens_per_month: 50000
+
+  # ─── Default Policy (Catch-all) ───
+  default:
+    description: "Default fallback for unspecified tasks"
+    primary:
+      model: "groq/llama-3.3-70b-versatile"
+      provider: "groq"
+      max_tokens: 2048
+      temperature: 0.1
+      timeout_ms: 30000
+      max_retries: 2
+    fallback_chain:
+      - model: "openai/gpt-4o-mini"
+        provider: "openai"
+        max_tokens: 2048
+        temperature: 0.1
+        timeout_ms: 30000
+        max_retries: 1
+
+# ─── Global Settings ───
+global:
+  # Default routing behavior
+  default_policy: "default"
+  
+  # Load balancing strategy
+  load_balancing:
+    strategy: "latency_based"  # round_robin, latency_based, cost_based
+    health_check_interval_ms: 30000
+    unhealthy_threshold: 3
+    healthy_threshold: 2
+  
+  # Circuit breaker
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    success_threshold: 2
+    timeout_seconds: 60
+    half_open_requests: 3
+  
+  # Rate limiting
+  rate_limiting:
+    global_rpm: 10000
+    global_tpm: 1000000
+    per_model_rpm: 3000
+    per_model_tpm: 500000
+    per_tenant_rpm: 1000
+    per_tenant_tpm: 100000
+    per_user_rpm: 200
+    per_user_tpm: 20000
+  
+  # Timeouts
+  timeouts:
+    connect_ms: 5000
+    read_ms: 60000
+    write_ms: 10000
+  
+  # Retry
+  retry:
+    max_attempts: 3
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+    exponential_base: 2
+    retryable_status_codes: [429, 500, 502, 503, 504]
+  
+  # Semantic caching
+  semantic_cache:
+    enabled: true
+    provider: "qdrant"
+    collection_prefix: "llm_cache"
+    vector_dimensions: 1536  # for text-embedding-3-small
+    default_ttl_seconds: 3600
+    max_entries_per_namespace: 100000
+  
+  # Budget enforcement
+  budget_enforcement:
+    enabled: true
+    check_interval_seconds: 60
+    soft_limit_action: "warn_and_queue"
+    hard_limit_action: "reject_with_retry_after"
+    emergency_limit_action: "reject_and_alert"
+    alert_webhook: "${BUDGET_ALERT_WEBHOOK}"
+  
+  # Cost tracking
+  cost_tracking:
+    enabled: true
+    currency: "USD"
+    precision: 6
+    aggregation_window_minutes: 5
+    retention_days: 90
+  
+  # Observability
+  observability:
+    tracing:
+      enabled: true
+      sample_rate: 0.1
+      exporter: "otlp"
+      endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+    metrics:
+      enabled: true
+      exporter: "prometheus"
+      port: 9090
+      path: "/metrics"
+    logging:
+      enabled: true
+      level: "INFO"
+      format: "json"
+      include_prompts: false  # Security
+      include_responses: false  # Security
+  
+  # Guardrails integration
+  guardrails:
+    enabled: true
+    pre_call_hook: true
+    post_call_hook: true
+    runtime_hook: true
+    timeout_ms: 5000
+    fail_open: false  # Fail closed for security
+  
+  # Canary deployment
+  canary:
+    enabled: true
+    traffic_percentage: 5
+    models:
+      - "openai/gpt-4o"
+    evaluation_metrics:
+      - "faithfulness_score"
+      - "hallucination_rate"
+      - "latency_p99"
+      - "cost_per_request"
+    rollback_threshold:
+      hallucination_rate: 0.05
+      latency_p99_ms: 10000
+  
+  # A/B testing
+  ab_testing:
+    enabled: true
+    experiments:
+      - name: "extraction_model_comparison"
+        control: "groq/llama-3.3-70b-versatile"
+        treatment: "openai/gpt-4o"
+        traffic_split: 0.1
+        metrics: ["faithfulness_score", "cost_per_request"]
+        min_sample_size: 1000
+        max_duration_days: 14
+
+# ─── Tenant Overrides ───
+# Per-tenant policy customization
+tenant_overrides:
+  # Example: Enterprise tenant gets premium models
+  "tenant_enterprise_001":
+    extraction_pipeline:
+      primary:
+        model: "openai/gpt-4o"
+      fallback_chain:
+        - model: "anthropic/claude-sonnet-4-20250514"
+    budget:
+      tenant_limit_tokens_per_month: 10000000
+  
+  # Example: Cost-sensitive tenant
+  "tenant_startup_001":
+    extraction_pipeline:
+      primary:
+        model: "groq/llama-3.3-70b-versatile"
+      fallback_chain:
+        - model: "openai/gpt-4o-mini"
+    cost_optimization:
+      enabled: true
+      max_cost_per_request_usd: 0.01
+    budget:
+      tenant_limit_tokens_per_month: 500000
+
+# ─── Model Version Pinning ───
+# Explicit model versions for reproducibility
+model_versions:
+  "groq/llama-3.3-70b-versatile": "llama-3.3-70b-versatile-2025-01"
+  "openai/gpt-4o": "gpt-4o-2024-08-06"
+  "openai/gpt-4o-mini": "gpt-4o-mini-2024-07-18"
+  "anthropic/claude-sonnet-4-20250514": "claude-sonnet-4-20250514"
+  "openai/text-embedding-3-large": "text-embedding-3-large-2024-02"
+  "cohere/embed-v3": "embed-v3-2024-10"

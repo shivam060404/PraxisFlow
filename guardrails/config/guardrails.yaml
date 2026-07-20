@@ -1,0 +1,313 @@
+# Guardrails Configuration for PraxisFlow
+
+# ─── Input Guardrails ───
+input_guardrails:
+  prompt_injection_detector:
+    enabled: true
+    # ML classifier endpoint (optional)
+    ml_classifier_url: "${INJECTION_CLASSIFIER_URL}"
+    ml_threshold: 0.8
+    # Pattern matching (always enabled)
+    patterns_enabled: true
+    # Action on detection
+    action: "block"  # block, flag, redact
+    log_all: true
+
+  pii_scanner:
+    enabled: true
+    # Presidio configuration
+    presidio:
+      enabled: true
+      language: "en"
+      entities:
+        - "PERSON"
+        - "EMAIL_ADDRESS"
+        - "PHONE_NUMBER"
+        - "US_SSN"
+        - "CREDIT_CARD"
+        - "IP_ADDRESS"
+        - "API_KEY"
+        - "CRYPTO_WALLET"
+        - "IBAN_CODE"
+      # Custom recognizers
+      custom_recognizers:
+        - name: "internal_employee_id"
+          pattern: "EMP-\d{6}"
+          score: 0.9
+        - name: "meeting_id"
+          pattern: "MTG-[A-Z0-9]{8}"
+          score: 0.8
+    # Regex patterns (backup)
+    regex_enabled: true
+    action: "redact"  # redact, block, flag
+    redaction_format: "[REDACTED_{entity_type}]"
+
+  topic_boundary:
+    enabled: true
+    # Allowed topics (meeting-related)
+    allowed_topics:
+      - "meeting"
+      - "transcript"
+      - "action item"
+      - "task"
+      - "decision"
+      - "follow up"
+      - "blocker"
+      - "agenda"
+      - "minutes"
+      - "discussion"
+      - "attendee"
+      - "participant"
+      - "deadline"
+      - "assignee"
+      - "priority"
+    # Blocked topics
+    blocked_topics:
+      - "code generation"
+      - "programming help"
+      - "debugging"
+      - "personal advice"
+      - "medical advice"
+      - "legal advice"
+      - "financial advice"
+      - "creative writing"
+      - "roleplay"
+    action: "block"
+    min_meeting_keywords: 1
+
+  jailbreak_detector:
+    enabled: true
+    action: "block"
+    log_all: true
+
+  input_length_validator:
+    enabled: true
+    max_tokens: 8000
+    max_chars: 32000
+    action: "block"
+
+  tenant_isolation:
+    enabled: true
+    action: "flag"  # flag suspicious cross-tenant references
+    check_uuids: true
+    check_emails: true
+
+# ─── Runtime Guardrails (NeMo) ───
+runtime_guardrails:
+  nemo_guardrails:
+    enabled: true
+    colang_config: "guardrails/colang/extraction_policies.co"
+    # NeMo configuration
+    config:
+      rails:
+        input:
+          flows:
+            - injection_detection
+            - pii_input_scan
+            - topic_boundary
+            - jailbreak_detection
+            - input_length_validation
+            - tenant_isolation_check
+        output:
+          flows:
+            - hallucination_check
+            - pii_output_scan
+            - format_validation
+            - confidence_threshold
+            - contradiction_detection
+            - content_policy_check
+        retrieval:
+          flows: []
+      models:
+        - type: "openai"
+          engine: "openai"
+          model: "gpt-4o-mini"
+      # Colang interpreter settings
+      interpreter:
+        max_turns: 10
+        timeout: 30
+
+  token_limit:
+    enabled: true
+    limits:
+      extraction: 4096
+      verification: 2048
+      entity_resolution: 1024
+      deduplication: 4096
+      conflict_resolution: 2048
+      summarization: 2048
+    action: "block"
+
+  temperature_lock:
+    enabled: true
+    locked_temperatures:
+      extraction: 0.1
+      verification: 0.0
+      entity_resolution: 0.0
+      deduplication: 0.0
+      conflict_resolution: 0.0
+      summarization: 0.3
+    tolerance: 0.05
+    action: "flag"
+
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    recovery_timeout_seconds: 60
+    half_open_requests: 3
+    action: "fallback"
+
+  latency_budget:
+    enabled: true
+    budgets_ms:
+      extraction: 30000
+      verification: 20000
+      entity_resolution: 15000
+      deduplication: 20000
+      conflict_resolution: 30000
+      summarization: 20000
+    action: "timeout_fallback"
+
+# ─── Output Guardrails ───
+output_guardrails:
+  hallucination_detector:
+    enabled: true
+    # Faithfulness scoring
+    method: "llm_judge"  # llm_judge, embedding_similarity, keyword_overlap
+    judge_model: "openai/gpt-4o-mini"
+    faithfulness_threshold: 0.7
+    hallucination_threshold: 0.1
+    completeness_threshold: 0.6
+    # Grounding check
+    require_grounding: true
+    action_on_failure: "route_to_human"  # block, route_to_human, flag
+
+  pii_output_scanner:
+    enabled: true
+    # Same config as input scanner
+    action: "redact"
+    log_leaks: true
+    alert_on_leak: true
+
+  format_validator:
+    enabled: true
+    schemas:
+      extraction:
+        required_fields:
+          - "tasks"
+          - "meeting_summary"
+          - "key_topics"
+        task_fields:
+          - "task_type"
+          - "title"
+          - "description"
+          - "confidence"
+          - "source_quote"
+      verification:
+        required_fields:
+          - "faithfulness_score"
+          - "hallucination_score"
+          - "completeness_score"
+          - "verdict"
+          - "reasoning"
+      entity_resolution:
+        required_fields:
+          - "assignee_id"
+          - "confidence"
+          - "method"
+    max_retries: 2
+    retry_with_format_instruction: true
+    action_on_failure: "retry"
+
+  confidence_threshold:
+    enabled: true
+    thresholds:
+      auto_approve: 0.90
+      review_recommended: 0.70
+      review_required: 0.50
+      reject: 0.50
+    actions:
+      auto_approve: "allow"
+      review_recommended: "flag"
+      review_required: "route_to_human"
+      reject: "retry"
+
+  contradiction_detector:
+    enabled: true
+    compare_with_prior: true
+    similarity_threshold: 0.7
+    check_fields:
+      - "assignee_hint"
+      - "deadline_hint"
+      - "priority_hint"
+    action: "route_to_human"
+
+  content_policy:
+    enabled: true
+    categories:
+      - "hate_speech"
+      - "violence"
+      - "illegal_activities"
+      - "pii_exposure"
+      - "sexual_content"
+      - "self_harm"
+    action: "block"
+    # Custom patterns
+    custom_patterns: []
+
+# ─── Human-in-the-Loop ───
+hitl:
+  enabled: true
+  review_queue:
+    max_size: 1000
+    priority_order:
+      - "low_confidence"
+      - "contradiction"
+      - "hallucination_flag"
+      - "pii_leak"
+      - "content_policy"
+    sla_hours:
+      low_confidence: 4
+      contradiction: 2
+      hallucination_flag: 1
+      pii_leak: 0.5
+      content_policy: 0
+  reviewers:
+    assignment_strategy: "round_robin"  # round_robin, skill_based, meeting_owner
+    min_reviewers: 1
+    required_approvals: 1
+  feedback_loop:
+    enabled: true
+    store_corrections: true
+    use_for_training: false  # Requires explicit consent
+    anonymize: true
+
+# ─── Logging & Monitoring ───
+logging:
+  level: "INFO"
+  format: "json"
+  log_all_results: true
+  log_blocked_content: false  # Security
+  log_flagged_content: true
+  metrics:
+    enabled: true
+    prefix: "guardrails"
+    labels:
+      - "layer"
+      - "guardrail_name"
+      - "action"
+      - "severity"
+      - "tenant_id"
+
+# ─── Integration ───
+integration:
+  # LLM Gateway hooks
+  pre_call_hook: true
+  post_call_hook: true
+  runtime_hook: true
+  # Timeout for guardrail checks
+  timeout_ms: 5000
+  # Fail behavior
+  fail_open: false  # CRITICAL: false for security
+  # Async execution
+  async_execution: true

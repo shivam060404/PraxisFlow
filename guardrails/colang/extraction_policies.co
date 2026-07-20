@@ -1,0 +1,233 @@
+# NeMo Guardrails Colang Policies for PraxisFlow
+# Extraction Pipeline Guardrails - Input, Runtime, and Output validation
+
+# ─── Input Guardrails ───
+
+define flow injection_detection
+  user said something
+  if injection_detected
+    bot refuse "I cannot process this request. Potential prompt injection detected."
+    stop
+
+define flow pii_input_scan
+  user said something
+  if pii_detected_in_input
+    $redacted = redact_pii($user_message)
+    bot continue with $redacted
+
+define flow topic_boundary
+  user said something
+  if not meeting_related
+    bot refuse "I can only process meeting transcripts and extract action items."
+    stop
+
+define flow jailbreak_detection
+  user said something
+  if jailbreak_pattern_matched
+    bot refuse "This request violates safety policies."
+    stop
+
+define flow input_length_validation
+  user said something
+  if input_too_long
+    bot refuse "Input exceeds maximum allowed length."
+    stop
+
+define flow tenant_isolation_check
+  user said something
+  if cross_tenant_context_detected
+    bot refuse "Cross-tenant data access is not permitted."
+    stop
+
+# ─── Runtime Guardrails (NeMo) ───
+
+define flow extraction_scope_enforcement
+  user said something
+  if not extraction_task
+    bot refuse "I can only extract tasks, decisions, follow-ups, and blockers from meeting transcripts."
+    stop
+
+define flow structured_output_enforcement
+  bot said something
+  if not valid_json_schema
+    bot retry with format correction
+    max_retries 2
+
+define flow temperature_lock
+  user said something
+  if extraction_node
+    $temperature = 0.1
+  else if verification_node
+    $temperature = 0.0
+  else if entity_resolution_node
+    $temperature = 0.0
+  else
+    $temperature = 0.3
+
+define flow token_limit_enforcement
+  user said something
+  if extraction_node
+    $max_tokens = 4096
+  else if verification_node
+    $max_tokens = 2048
+  else if entity_resolution_node
+    $max_tokens = 1024
+  else
+    $max_tokens = 2048
+
+define flow latency_budget
+  user said something
+  if extraction_node
+    $timeout = 30000
+  else if verification_node
+    $timeout = 20000
+  else if entity_resolution_node
+    $timeout = 15000
+  else
+    $timeout = 20000
+
+define flow circuit_breaker_check
+  user said something
+  if circuit_open_for_model
+    bot fallback_to_next_provider
+
+define flow retry_with_backoff
+  bot failed
+  if retryable_error
+    bot retry
+    exponential_backoff
+    max_retries 3
+
+# ─── Output Guardrails ───
+
+define flow hallucination_check
+  bot said something
+  if not grounded_in_transcript
+    $score = calculate_faithfulness_score
+    if $score < 0.7
+      bot flag "Potential hallucination detected. Faithfulness score: {$score}"
+      route_to_human_review
+    else
+      bot continue
+
+define flow pii_output_scan
+  bot said something
+  if pii_detected_in_output
+    $redacted = redact_pii($bot_message)
+    bot log "PII detected and redacted in output"
+    bot continue with $redacted
+
+define flow format_validation
+  bot said something
+  if not valid_task_schema
+    bot retry with format correction
+    max_retries 2
+
+define flow confidence_threshold
+  bot said something
+  if extraction_confidence < 0.5
+    bot reject "Confidence too low. Re-extracting with different model."
+  else if extraction_confidence < 0.7
+    bot flag "Low confidence extraction. Queued for human review."
+    route_to_human_review
+  else if extraction_confidence < 0.9
+    bot flag "Medium confidence. Review recommended."
+    route_to_human_review
+  else
+    bot continue "High confidence extraction. Auto-approved."
+
+define flow contradiction_detection
+  bot said something
+  if contradicts_prior_extraction
+    bot flag "Contradiction detected with previous extraction from this meeting."
+    route_to_human_review
+
+define flow content_policy_check
+  bot said something
+  if harmful_content_detected
+    bot refuse "Generated content violates content policy."
+    stop
+
+# ─── Helper Functions (implemented in Python) ───
+
+define user injection_detected
+  $result = check_prompt_injection($user_message)
+  return $result
+
+define user pii_detected_in_input
+  $result = scan_pii($user_message)
+  return $result
+
+define user meeting_related
+  $result = check_meeting_context($user_message)
+  return $result
+
+define user jailbreak_pattern_matched
+  $result = check_jailbreak($user_message)
+  return $result
+
+define user input_too_long
+  $result = check_length($user_message, max_tokens=8000)
+  return $result
+
+define user cross_tenant_context_detected
+  $result = check_tenant_isolation($user_message)
+  return $result
+
+define user extraction_task
+  $result = is_extraction_request($user_message)
+  return $result
+
+define bot valid_json_schema
+  $result = validate_json_schema($bot_message, schema="ExtractionResult")
+  return $result
+
+define bot grounded_in_transcript
+  $result = check_grounding($bot_message, $transcript_context)
+  return $result
+
+define bot pii_detected_in_output
+  $result = scan_pii($bot_message)
+  return $result
+
+define bot valid_task_schema
+  $result = validate_task_schema($bot_message)
+  return $result
+
+define bot extraction_confidence
+  $result = get_confidence_score($bot_message)
+  return $result
+
+define bot contradicts_prior_extraction
+  $result = check_contradiction($bot_message, $prior_extractions)
+  return $result
+
+define bot harmful_content_detected
+  $result = check_content_policy($bot_message)
+  return $result
+
+# ─── Actions (implemented in Python) ───
+
+define bot refuse $message
+  execute raise_guardrail_exception(message=$message, action="refuse")
+
+define bot continue with $message
+  execute pass_message(message=$message)
+
+define bot retry with format correction
+  execute retry_with_format_correction()
+
+define bot flag $message
+  execute log_guardrail_event(message=$message, severity="warning")
+
+define bot route_to_human_review
+  execute queue_for_human_review()
+
+define bot log $message
+  execute log_event(message=$message)
+
+define bot fallback_to_next_provider
+  execute switch_model_provider()
+
+define bot pass_message
+  execute pass_through()

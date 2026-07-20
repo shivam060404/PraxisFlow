@@ -1,0 +1,357 @@
+# LiteLLM Proxy Configuration for PraxisFlow
+# Enterprise LLM Gateway with routing, fallbacks, budgets, caching, and observability
+
+# ─── General Settings ───
+general_settings:
+  master_key: "${LITELLM_MASTER_KEY:-sk-proxy-master-key-change-in-production}"
+  max_request_size_mb: 100
+  drop_params: true
+  request_timeout: 120
+  default_max_tokens: 4096
+  default_temperature: 0.1
+  callbacks:
+    - "langfuse"
+    - "otel"
+  # Custom headers for tracing
+  custom_headers:
+    X-PraxisFlow-Source: "llm-gateway"
+    X-PraxisFlow-Version: "2.0"
+
+# ─── Model List (Populated from routing_policies.yaml at runtime) ───
+# This is a template - actual models loaded from routing_policies.yaml
+model_list: []
+
+# ─── Router Settings ───
+router_settings:
+  routing_strategy: "latency-based-routing"  # or "cost-based-routing", "priority-based"
+  enable_retries: true
+  num_retries: 3
+  retry_after: 60
+  timeout: 120
+  fallbacks:
+    - "groq/llama-3.3-70b-versatile"
+    - "openai/gpt-4o"
+    - "anthropic/claude-sonnet-4-20250514"
+  # Model-specific routing
+  model_fallbacks:
+    extraction_pipeline:
+      - "groq/llama-3.3-70b-versatile"
+      - "openai/gpt-4o"
+      - "anthropic/claude-sonnet-4-20250514"
+    verification_node:
+      - "openai/gpt-4o"
+      - "anthropic/claude-sonnet-4-20250514"
+    entity_resolution:
+      - "groq/llama-3.3-70b-versatile"
+      - "openai/gpt-4o-mini"
+    embedding:
+      - "openai/text-embedding-3-large"
+      - "cohere/embed-v3"
+    summarization:
+      - "groq/llama-3.3-70b-versatile"
+      - "openai/gpt-4o-mini"
+
+# ─── Cache Settings (Semantic Caching with Qdrant) ───
+cache:
+  type: "qdrant"
+  host: "${QDRANT_HOST:-qdrant}"
+  port: 6333
+  api_key: "${QDRANT_API_KEY}"
+  collection_name: "llm_semantic_cache"
+  embedding_model: "text-embedding-3-small"
+  embedding_dimensions: 1536
+  similarity_threshold: 0.95
+  ttl_seconds: 86400  # 24 hours
+  max_size: 100000
+  # Cache key includes tenant_id for isolation
+  cache_key_prefix: "praxisflow"
+
+# ─── Budget & Rate Limiting ───
+budget:
+  # Global budget (organization level)
+  max_parallel_requests: 100
+  max_requests_per_minute: 10000
+  max_tokens_per_minute: 5000000
+  
+  # Per-tenant budgets (configured via API/database)
+  tenant_budget_enabled: true
+  default_tenant_budget:
+    max_requests_per_minute: 100
+    max_tokens_per_minute: 50000
+    max_tokens_per_day: 1000000
+    max_cost_per_day_usd: 100.0
+  
+  # Budget enforcement
+  budget_enforcement: "block"  # "block", "queue", "warn"
+  budget_reset_schedule: "0 0 * * *"  # Daily at midnight UTC
+  
+  # Soft/hard limits
+  soft_limit_pct: 80
+  hard_limit_pct: 100
+  emergency_limit_pct: 120
+
+# ─── Rate Limiting ───
+rate_limit:
+  enabled: true
+  default_limits:
+    requests_per_minute: 60
+    requests_per_hour: 1000
+    requests_per_day: 10000
+    tokens_per_minute: 50000
+    tokens_per_hour: 500000
+    tokens_per_day: 5000000
+  
+  # Per-model limits
+  model_limits:
+    "groq/llama-3.3-70b-versatile":
+      requests_per_minute: 300
+      tokens_per_minute: 100000
+    "openai/gpt-4o":
+      requests_per_minute: 60
+      tokens_per_minute: 20000
+    "openai/gpt-4o-mini":
+      requests_per_minute: 300
+      tokens_per_minute: 100000
+    "anthropic/claude-sonnet-4-20250514":
+      requests_per_minute: 50
+      tokens_per_minute: 40000
+  
+  # Key-based limits (API keys)
+  key_limits: {}
+  
+  # Response headers
+  headers:
+    enabled: true
+    limit_header: "X-RateLimit-Limit"
+    remaining_header: "X-RateLimit-Remaining"
+    reset_header: "X-RateLimit-Reset"
+
+# ─── Circuit Breaker ───
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  success_threshold: 2
+  timeout_seconds: 60
+  half_open_requests: 3
+  # Per-model circuit breakers
+  model_breakers:
+    "groq/llama-3.3-70b-versatile":
+      failure_threshold: 10
+      timeout_seconds: 30
+    "openai/gpt-4o":
+      failure_threshold: 5
+      timeout_seconds: 60
+    "anthropic/claude-sonnet-4-20250514":
+      failure_threshold: 5
+      timeout_seconds: 60
+
+# ─── Load Balancing ───
+load_balancer:
+  strategy: "least_busy"  # "round_robin", "latency_based", "least_busy"
+  health_check_interval: 30
+  health_check_timeout: 10
+  unhealthy_threshold: 3
+  healthy_threshold: 2
+
+# ─── Logging & Observability ───
+logging:
+  level: "INFO"
+  format: "json"
+  request_logging: true
+  response_logging: true
+  log_request_body: false  # Security: don't log prompts
+  log_response_body: false  # Security: don't log responses
+  # Structured logging fields
+  custom_fields:
+    - "tenant_id"
+    - "user_id"
+    - "request_id"
+    - "model"
+    - "pipeline_node"
+
+# ─── OpenTelemetry ───
+otel:
+  enabled: true
+  exporter: "otlp"
+  endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}"
+  service_name: "praxisflow-llm-gateway"
+  resource_attributes:
+    service.name: "praxisflow-llm-gateway"
+    service.version: "2.0.0"
+    deployment.environment: "${ENVIRONMENT:-development}"
+  # GenAI semantic conventions
+  gen_ai_attributes:
+    enabled: true
+    capture_prompt: false  # Security
+    capture_completion: false  # Security
+    capture_token_usage: true
+    capture_cost: true
+    capture_latency: true
+
+# ─── Langfuse Integration ───
+langfuse:
+  enabled: true
+  public_key: "${LANGFUSE_PUBLIC_KEY}"
+  secret_key: "${LANGFUSE_SECRET_KEY}"
+  host: "${LANGFUSE_HOST:-http://langfuse:3000}"
+  # Trace configuration
+  trace_name: "praxisflow-llm-call"
+  # Custom metadata
+  metadata:
+    gateway_version: "2.0.0"
+    environment: "${ENVIRONMENT:-development}"
+
+# ─── Prometheus Metrics ───
+prometheus:
+  enabled: true
+  port: 9090
+  path: "/metrics"
+  # Custom metrics
+  custom_metrics:
+    - name: "llm_gateway_requests_total"
+      type: "counter"
+      help: "Total LLM requests"
+      labels: ["model", "status", "tenant_id", "pipeline_node"]
+    - name: "llm_gateway_tokens_total"
+      type: "counter"
+      help: "Total tokens processed"
+      labels: ["model", "type", "tenant_id"]
+    - name: "llm_gateway_latency_seconds"
+      type: "histogram"
+      help: "LLM request latency"
+      labels: ["model", "tenant_id", "pipeline_node"]
+      buckets: [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+    - name: "llm_gateway_cost_usd_total"
+      type: "counter"
+      help: "Total cost in USD"
+      labels: ["model", "tenant_id", "pipeline_node"]
+    - name: "llm_gateway_cache_hit_total"
+      type: "counter"
+      help: "Cache hits"
+      labels: ["model", "tenant_id"]
+    - name: "llm_gateway_budget_exceeded_total"
+      type: "counter"
+      help: "Budget exceeded events"
+      labels: ["tenant_id", "budget_type"]
+    - name: "llm_gateway_circuit_breaker_state"
+      type: "gauge"
+      help: "Circuit breaker state (0=closed, 1=open, 2=half-open)"
+      labels: ["model"]
+
+# ─── Security ───
+security:
+  # API Key authentication
+  api_key_auth: true
+  # JWT validation
+  jwt_auth: true
+  jwt_secret: "${JWT_SECRET}"
+  jwt_algorithm: "HS256"
+  # Allowed origins
+  cors:
+    enabled: true
+    allow_origins:
+      - "http://localhost:3000"
+      - "https://app.praxisflow.com"
+    allow_methods: ["GET", "POST", "OPTIONS"]
+    allow_headers: ["*"]
+    allow_credentials: true
+  
+  # Request validation
+  request_validation:
+    max_input_tokens: 100000
+    max_output_tokens: 8192
+    allowed_models: []  # Empty = all configured models
+    blocked_models: []
+  
+  # Content filtering
+  content_filter:
+    enabled: true
+    # PII detection before sending to LLM
+    pii_detection: true
+    pii_action: "redact"  # "redact", "block", "flag"
+    # Injection detection
+    injection_detection: true
+    injection_action: "block"
+
+# ─── Proxy Settings ───
+proxy:
+  # Forward headers to True = LiteLLM handles auth, False = pass through
+  pass_through_auth: false
+  # Add custom headers to upstream requests
+  custom_headers:
+    User-Agent: "PraxisFlow-LLM-Gateway/2.0"
+  # Request/Response hooks (for guardrails integration)
+  pre_call_hook: "app.guardrails.pre_call_hook"
+  post_call_hook: "app.guardrails.post_call_hook"
+  # Streaming
+  stream_options:
+    enabled: true
+    chunk_size: 1024
+
+# ─── Database (for budget tracking, key management) ───
+database:
+  type: "postgresql"
+  url: "${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/litellm}"
+  pool_size: 20
+  max_overflow: 10
+  pool_timeout: 30
+  pool_recycle: 3600
+
+# ─── Redis (for rate limiting, caching, session) ───
+redis:
+  host: "${REDIS_HOST:-redis}"
+  port: 6379
+  password: "${REDIS_PASSWORD}"
+  db: 0
+  ssl: false
+  max_connections: 50
+
+# ─── Admin UI ───
+admin_ui:
+  enabled: true
+  path: "/admin"
+  # Protected by master key
+  auth: true
+
+# ─── Webhook Callbacks ───
+webhooks:
+  # Budget alerts
+  budget_alert:
+    enabled: true
+    url: "${WEBHOOK_BUDGET_ALERT_URL}"
+    events:
+      - "budget_soft_limit"
+      - "budget_hard_limit"
+      - "budget_emergency_limit"
+  # Circuit breaker alerts
+  circuit_breaker_alert:
+    enabled: true
+    url: "${WEBHOOK_CIRCUIT_BREAKER_URL}"
+    events:
+      - "circuit_opened"
+      - "circuit_closed"
+  # Error alerts
+  error_alert:
+    enabled: true
+    url: "${WEBHOOK_ERROR_ALERT_URL}"
+    events:
+      - "rate_limit_exceeded"
+      - "model_unavailable"
+      - "validation_error"
+
+# ─── Feature Flags ───
+features:
+  semantic_caching: true
+  budget_enforcement: true
+  circuit_breaker: true
+  model_fallbacks: true
+  load_balancing: true
+  request_logging: true
+  response_logging: false  # Security
+  prompt_injection_detection: true
+  pii_detection: true
+  cost_tracking: true
+  langfuse_tracing: true
+  otel_tracing: true
+  canary_deployment: true
+  ab_testing: true

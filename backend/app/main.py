@@ -13,6 +13,20 @@ from app.db.prisma import get_prisma, close_prisma, set_tenant_context, get_db
 from app.schemas import HealthResponse, ErrorResponse
 from app.workers.kafka_consumers import startup_kafka, shutdown_kafka
 
+# ─── Enterprise Components ───
+from app.observability import init_observability, shutdown_observability, get_otel_logger, genai_tracer, LLMCallAttributes
+from app.observability.langfuse_client import init_langfuse, get_langfuse_client
+from app.guardrails.manager import guardrails_manager
+from app.security import (
+    TenantIsolationMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    RequestValidationMiddleware,
+    AuditLoggingMiddleware,
+    build_security_middleware_stack,
+    get_cors_config,
+)
+
 # Configure structured logging
 structlog.configure(
     processors=[
@@ -38,10 +52,29 @@ logger = structlog.get_logger()
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     # Startup
-    logger.info("Starting AMI Backend", environment=settings.ENVIRONMENT)
+    logger.info("Starting PraxisFlow Backend", environment=settings.ENVIRONMENT)
     
     # Initialize Prisma
     await get_prisma()
+    
+    # Initialize observability stack
+    init_observability(
+        service_name="praxisflow-api",
+        version="2.0.0",
+    )
+    logger.info("OpenTelemetry initialized")
+    
+    # Initialize Langfuse
+    init_langfuse(
+        public_key=settings.LANGFUSE_PUBLIC_KEY,
+        secret_key=settings.LANGFUSE_SECRET_KEY,
+        host=settings.LANGFUSE_HOST,
+    )
+    logger.info("Langfuse initialized")
+    
+    # Initialize guardrails
+    await guardrails_manager.initialize()
+    logger.info("Guardrails initialized")
     
     # Initialize Kafka consumers
     await startup_kafka()
@@ -49,15 +82,21 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down AMI Backend")
+    logger.info("Shutting down PraxisFlow Backend")
     await shutdown_kafka()
     await close_prisma()
+    shutdown_observability()
+    
+    # Flush Langfuse
+    langfuse_client = get_langfuse_client()
+    if langfuse_client:
+        langfuse_client.flush()
 
 
 app = FastAPI(
-    title="AI Meeting Intelligence & Action Command Center",
+    title="PraxisFlow - Enterprise AI Meeting Intelligence",
     description="Transform passive meeting recordings into structured, trackable, and accountable execution workflows",
-    version="0.1.0",
+    version="2.0.0",
     docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
     redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
     lifespan=lifespan,
@@ -66,20 +105,32 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    **get_cors_config(),
 )
 
+# ─── Security Middleware Stack (order matters: outer to inner) ───
+# 1. Audit logging (outermost - logs everything)
+app.add_middleware(AuditLoggingMiddleware)
 
-# ─── Middleware ───
+# 2. Security headers
+app.add_middleware(SecurityHeadersMiddleware)
 
+# 3. Request validation
+app.add_middleware(RequestValidationMiddleware)
+
+# 4. Rate limiting
+app.add_middleware(RateLimitMiddleware)
+
+# 5. Tenant isolation (innermost - sets context for handlers)
+app.add_middleware(TenantIsolationMiddleware)
+
+
+# ─── Process Time Middleware (for metrics) ───
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     """Add X-Process-Time header and log requests."""
     start_time = time.time()
-    request_id = str(uuid.uuid4())
+    request_id = str(uuid.uuid4())[:8]
     
     # Add request ID to structlog context
     structlog.contextvars.clear_contextvars()
@@ -91,7 +142,9 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-Process-Time"] = str(process_time)
     response.headers["X-Request-ID"] = request_id
     
-    logger.info(
+    # Log with OTel logger
+    otel_logger = get_otel_logger("praxisflow.api")
+    otel_logger.info(
         "HTTP Request",
         method=request.method,
         path=request.url.path,
@@ -99,38 +152,6 @@ async def add_process_time_header(request: Request, call_next):
         process_time_ms=round(process_time * 1000, 2),
     )
     
-    return response
-
-
-@app.middleware("http")
-async def tenant_isolation_middleware(request: Request, call_next):
-    """Extract tenant from JWT and set RLS context."""
-    # Skip for health checks and docs
-    if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json"]:
-        return await call_next(request)
-    
-    # Extract tenant from Authorization header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": "Missing or invalid Authorization header"},
-        )
-    
-    token = auth_header.replace("Bearer ", "")
-    
-    # TODO: Validate JWT and extract tenant_id
-    # For now, use dev tenant
-    tenant_id = "00000000-0000-0000-0000-000000000001"
-    
-    # Set RLS context for this request
-    db = await get_prisma()
-    await set_tenant_context(db, tenant_id)
-    
-    # Add tenant_id to request state for downstream use
-    request.state.tenant_id = tenant_id
-    
-    response = await call_next(request)
     return response
 
 
@@ -175,23 +196,73 @@ async def health_check():
     except Exception:
         pass
     
+    # Check other services
+    services = {
+        "database": "healthy" if db_healthy else "unhealthy",
+        "qdrant": "unknown",
+        "neo4j": "unknown",
+        "kafka": "unknown",
+        "redis": "unknown",
+        "llm_gateway": "unknown",
+    }
+    
+    # Try to check Qdrant
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get("http://qdrant:6333/healthz")
+            services["qdrant"] = "healthy" if resp.status_code == 200 else "unhealthy"
+    except Exception:
+        services["qdrant"] = "unhealthy"
+    
+    # Try to check Redis
+    try:
+        import redis.asyncio as redis
+        r = redis.from_url("redis://redis:6379")
+        await r.ping()
+        services["redis"] = "healthy"
+    except Exception:
+        services["redis"] = "unhealthy"
+    
+    # Try to check LLM Gateway
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get("http://llm-gateway:4000/health/liveliness")
+            services["llm_gateway"] = "healthy" if resp.status_code == 200 else "unhealthy"
+    except Exception:
+        services["llm_gateway"] = "unhealthy"
+    
+    overall_status = "healthy" if all(v == "healthy" for v in services.values()) else "degraded"
+    
     return HealthResponse(
-        status="healthy" if db_healthy else "degraded",
-        version="0.1.0",
+        status=overall_status,
+        version="2.0.0",
         environment=settings.ENVIRONMENT,
-        services={
-            "database": "healthy" if db_healthy else "unhealthy",
-            "qdrant": "unknown",
-            "neo4j": "unknown",
-            "kafka": "unknown",
-            "redis": "unknown",
-        },
+        services=services,
     )
+
+
+@app.get("/ready", tags=["Health"])
+async def readiness_check():
+    """Kubernetes readiness probe."""
+    db = await get_prisma()
+    try:
+        await db.execute_raw("SELECT 1")
+        return {"status": "ready"}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Not ready")
+
+
+@app.get("/live", tags=["Health"])
+async def liveness_check():
+    """Kubernetes liveness probe."""
+    return {"status": "alive"}
 
 
 # ─── API Routes ───
 
-from app.api import meetings, tasks, transcripts, integrations, websocket, users, metrics
+from app.api import meetings, tasks, transcripts, integrations, websocket, users, metrics, admin, compliance, webhooks
 
 app.include_router(meetings.router, prefix=settings.API_V1_PREFIX)
 app.include_router(tasks.router, prefix=settings.API_V1_PREFIX)
@@ -200,6 +271,9 @@ app.include_router(integrations.router, prefix=settings.API_V1_PREFIX)
 app.include_router(websocket.router, prefix=settings.API_V1_PREFIX)
 app.include_router(users.router, prefix=settings.API_V1_PREFIX)
 app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
+app.include_router(admin.router, prefix=settings.API_V1_PREFIX)
+app.include_router(compliance.router, prefix=settings.API_V1_PREFIX)
+app.include_router(webhooks.router, prefix=settings.API_V1_PREFIX)
 
 
 # ─── Root ───
@@ -207,8 +281,10 @@ app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "name": "AI Meeting Intelligence & Action Command Center",
-        "version": "0.1.0",
+        "name": "PraxisFlow - Enterprise AI Meeting Intelligence",
+        "version": "2.0.0",
         "docs": "/docs",
         "health": "/health",
+        "readiness": "/ready",
+        "liveness": "/live",
     }
