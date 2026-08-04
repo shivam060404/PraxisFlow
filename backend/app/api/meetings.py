@@ -270,3 +270,28 @@ async def reprocess_meeting(
     process_meeting.delay(str(meeting_id))
     
     return {"message": "Meeting queued for reprocessing", "meeting_id": str(meeting_id)}
+
+
+@router.get("/{meeting_id}/status")
+async def get_meeting_status(
+    meeting_id: UUID,
+    db=Depends(get_db),
+):
+    """Get meeting processing status."""
+    meeting = await db.meeting.find_unique(
+        where={"id": str(meeting_id)},
+        include={"transcript": True, "_count": {"select": {"tasks": True}}},
+    )
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+    
+    return {
+        "meeting_id": str(meeting_id),
+        "status": meeting.status,
+        "has_transcript": meeting.transcript is not None,
+        "task_count": meeting._count.tasks if meeting._count else 0,
+        "updated_at": meeting.updatedAt,
+    }

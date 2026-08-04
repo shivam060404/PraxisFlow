@@ -357,6 +357,81 @@ async def get_task_audit_log(
     return logs
 
 
+@router.get("/{task_id}/source-quote")
+async def get_task_source_quote(
+    task_id: UUID,
+    word_start: int,
+    word_end: int,
+    db=Depends(get_db),
+):
+    """Get the source transcript span for a task."""
+    task = await db.task.find_unique(
+        where={"id": str(task_id)},
+        include={"meeting": {"include": {"transcript": True}}},
+    )
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+    
+    if not task.meeting or not task.meeting.transcript:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transcript not found",
+        )
+    
+    transcript = task.meeting.transcript
+    words = transcript.fullText.split()
+    
+    if word_start >= len(words) or word_end >= len(words):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid word indices",
+        )
+    
+    span_text = " ".join(words[word_start:word_end + 1])
+    
+    return {
+        "text": span_text,
+        "word_start": word_start,
+        "word_end": word_end,
+        "task_id": str(task_id),
+    }
+
+
+@router.post("/{task_id}/sync")
+async def sync_task_to_integration(
+    task_id: UUID,
+    integration_id: UUID,
+    db=Depends(get_db),
+):
+    """Sync a task to an external integration."""
+    task = await db.task.find_unique(where={"id": str(task_id)})
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+    
+    integration = await db.integration.find_unique(where={"id": str(integration_id)})
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Integration not found",
+        )
+    
+    # Trigger sync via Kafka
+    from app.workers.kafka_consumers import send_integration_sync
+    await send_integration_sync(
+        task_id=str(task_id),
+        integration_id=str(integration_id),
+        tenant_id=task.tenantId,
+    )
+    
+    return {"status": "sync_triggered", "task_id": str(task_id)}
+
+
 # ─── State Machine Validation ───
 
 VALID_TRANSITIONS = {
