@@ -12,7 +12,7 @@ from datetime import datetime
 from app.core.config import settings
 from app.guardrails.input_guardrails import (
     PromptInjectionDetector,
-    PIIScanner,
+    InputPIIScanner,
     TopicBoundaryGuard,
     JailbreakDetector,
     InputLengthValidator,
@@ -56,7 +56,7 @@ class GuardrailsManager:
         # Input guardrails
         self.input_guardrails = [
             PromptInjectionDetector(enabled=True),
-            PIIScanner(enabled=True, action="redact"),
+            InputPIIScanner(enabled=True, action="redact"),
             TopicBoundaryGuard(enabled=True),
             JailbreakDetector(enabled=True),
             InputLengthValidator(max_tokens=8000, enabled=True),
@@ -420,7 +420,7 @@ async def check_prompt_injection(text: str) -> bool:
 
 async def scan_pii(text: str) -> Dict[str, int]:
     """Scan text for PII."""
-    scanner = PIIScanner()
+    scanner = InputPIIScanner()
     from app.guardrails.base import GuardrailContext
     ctx = GuardrailContext(tenant_id="", user_id="")
     result = await scanner.check(text, ctx)

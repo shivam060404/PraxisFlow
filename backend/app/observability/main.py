@@ -28,7 +28,9 @@ from app.observability.otel import (
     LLMCallAttributes,
     trace_llm_call,
     OTelStructuredLogger,
+    PF_GUARDRAIL_ACTIONS,
 )
+from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 

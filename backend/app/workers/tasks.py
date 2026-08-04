@@ -64,7 +64,6 @@ async def _process_meeting_async(meeting_id: str):
         )
     
     # Step 2: Run extraction pipeline
-    from app.workers.tasks import run_extraction
     run_extraction.delay(meeting_id)
     
     return {"status": "transcribed", "meeting_id": meeting_id}

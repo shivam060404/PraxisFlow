@@ -107,7 +107,7 @@ class TestInputPIIScanner:
         assert "phone_us" in result.metadata.get("pii_types", {})
 
     @pytest.mark.asyncio
-    async test_detects_credit_card(self, guardrail_context):
+    async def test_detects_credit_card(self, guardrail_context):
         scanner = InputPIIScanner(enabled=True)
         
         text = "My card is 4111-1111-1111-1111"
@@ -270,7 +270,7 @@ class TestCircuitBreakerGuard:
     @pytest.mark.asyncio
     async def test_fallback_when_open(self, guardrail_context):
         guard = CircuitBreakerGuard(enabled=True)
-        guardrail_context.model_config = {"model": "bad_model"
+        guardrail_context.model_config = {"model": "bad_model"}
         
         # Force circuit open
         guard.record_failure("bad_model")
