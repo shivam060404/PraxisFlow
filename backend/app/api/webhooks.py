@@ -7,9 +7,10 @@ import hmac
 import hashlib
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Request, HTTPException, Header, Depends
 from pydantic import BaseModel
@@ -18,6 +19,13 @@ from app.db.prisma import get_prisma
 from app.integrations.factory import IntegrationFactory
 from app.security import require_permission, Permission
 from app.schemas import WebhookEvent
+from app.agents.graph_runner import (
+    resume_extraction_pipeline_wrapper,
+    check_pipeline_status,
+    create_hitl_approval_feedback,
+    create_hitl_modification_feedback,
+)
+from app.agents.schemas import HITLPayload
 
 logger = logging.getLogger(__name__)
 
@@ -416,3 +424,135 @@ async def test_webhook(
         return {"status": "sent", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Test webhook failed: {e}")
+
+
+# ─── HITL (Human-in-the-Loop) Webhook Endpoints ───
+
+class HITLTaskFeedback(BaseModel):
+    """Feedback for a single task in HITL review."""
+    task_id: str  # Task title or identifier
+    action: Literal["APPROVE", "REJECT", "MODIFY"]
+    modifications: Optional[Dict[str, Any]] = None
+
+
+class HITLResumeRequest(BaseModel):
+    """Request to resume a paused pipeline with human feedback."""
+    meeting_id: str
+    tasks: List[HITLTaskFeedback]  # List of task feedbacks
+    reviewer_id: Optional[str] = None
+    comment: Optional[str] = None
+
+
+class HITLStatusResponse(BaseModel):
+    """Response for pipeline status check."""
+    status: str
+    meeting_id: str
+    progress: float
+    interrupt_node: Optional[str] = None
+    interrupt_reason: Optional[str] = None
+    interrupt_payload: Optional[Dict[str, Any]] = None
+    tasks_created: Optional[int] = None
+    errors: Optional[List[str]] = None
+
+
+@router.post("/hitl/resume", response_model=Dict[str, Any])
+async def hitl_resume_pipeline(
+    request: HITLResumeRequest,
+    current_user = Depends(require_permission(Permission.TASK_UPDATE)),
+):
+    """
+    Resume a paused extraction pipeline after human review.
+    
+    This endpoint is called by the frontend when a human approves/rejects/modifies
+    tasks that were flagged for review during the verification step.
+    """
+    # Build human feedback dict for multiple tasks
+    feedback = {
+        "tasks": [],
+        "reviewer_id": request.reviewer_id or current_user.id,
+        "comment": request.comment,
+    }
+    
+    for task_feedback in request.tasks:
+        feedback["tasks"].append({
+            "task_id": task_feedback.task_id,
+            "action": task_feedback.action,
+            "modifications": task_feedback.modifications,
+        })
+    
+    try:
+        final_state = await resume_extraction_pipeline_wrapper(
+            meeting_id=request.meeting_id,
+            human_feedback=feedback,
+        )
+        
+        return {
+            "status": "resumed",
+            "meeting_id": request.meeting_id,
+            "tasks_finalized": len(final_state.final_tasks) if final_state.final_tasks else 0,
+            "errors": final_state.errors,
+        }
+        
+    except Exception as e:
+        logger.error(f"HITL resume failed for meeting {request.meeting_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to resume pipeline: {str(e)}")
+
+
+@router.get("/hitl/status/{meeting_id}", response_model=HITLStatusResponse)
+async def hitl_pipeline_status(
+    meeting_id: str,
+    current_user = Depends(require_permission(Permission.TASK_READ)),
+):
+    """
+    Check the status of an extraction pipeline, including HITL interrupt state.
+    
+    Returns whether the pipeline is running, completed, failed, or interrupted
+    waiting for human review.
+    """
+    status = await check_pipeline_status(meeting_id)
+    return HITLStatusResponse(**status)
+
+
+@router.get("/hitl/pending", response_model=List[HITLStatusResponse])
+async def hitl_pending_reviews(
+    tenant_id: str,
+    current_user = Depends(require_permission(Permission.TASK_READ)),
+):
+    """
+    List all pipelines currently waiting for human review (interrupted).
+    
+    Useful for dashboard showing pending HITL tasks.
+    """
+    # This would require a more complex query - for now return empty
+    # In production, you'd track interrupted pipelines in a separate table
+    return []
+
+
+# ─── Webhook Event Types for HITL ───
+
+HITL_EVENT_TYPES = [
+    "pipeline.interrupted",
+    "pipeline.resumed",
+    "pipeline.completed",
+    "pipeline.failed",
+]
+
+
+async def emit_hitl_event(
+    event_type: str,
+    meeting_id: str,
+    tenant_id: str,
+    payload: Dict[str, Any],
+):
+    """Emit HITL event to Kafka for real-time UI updates."""
+    from app.services.kafka_events import kafka_event_publisher
+    
+    event = {
+        "type": event_type,
+        "meeting_id": meeting_id,
+        "tenant_id": tenant_id,
+        "payload": payload,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    
+    await kafka_event_publisher.publish("hitl-events", event)

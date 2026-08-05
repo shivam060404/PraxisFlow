@@ -10,6 +10,8 @@ from app.db.prisma import get_prisma
 from app.services.asr import transcribe_meeting
 from app.services.storage import storage_service
 from app.workers.celery_app import celery_app, async_task
+from app.agents.schemas import TranscriptChunk
+from app.agents.graph_runner import run_extraction_pipeline_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +133,6 @@ async def _run_extraction_async(meeting_id: str):
     )
     
     # Build transcript chunks from utterances for the LangGraph pipeline
-    from app.agents.schemas import TranscriptChunk
-    from app.agents.graph_runner import run_extraction_pipeline
-    
     transcript_chunks = []
     if transcript.utterances:
         for i, utt in enumerate(transcript.utterances):
@@ -155,26 +154,53 @@ async def _run_extraction_async(meeting_id: str):
             speakers=["Unknown"],
         ))
     
+    # Get a user_id for the pipeline (use meeting organizer or first attendee)
+    user_id = meeting.organizerId
+    if not user_id and meeting.attendees:
+        user_id = meeting.attendees[0].userId
+    if not user_id:
+        # Fallback: get any user from tenant
+        any_user = await db.user.find_first(where={"tenantId": meeting.tenantId})
+        user_id = any_user.id if any_user else meeting.tenantId
+    
     # Run the full LangGraph extraction pipeline
     # This runs: chunking → extraction → dedup → verification → entity_resolution → persistence
-    final_state = await run_extraction_pipeline(
+    final_state = await run_extraction_pipeline_wrapper(
         meeting_id=meeting_id,
         tenant_id=meeting.tenantId,
+        user_id=user_id,
         meeting_context=f"Meeting: {meeting.title}",
         transcript_chunks=transcript_chunks,
     )
     
     # The persistence_node in the graph already creates Task records and
     # updates the meeting status to EXTRACTED. Now queue verification
-    # for any tasks that need it.
+    # for any tasks that need it (NEEDS_REVIEW from pipeline).
     tasks = await db.task.find_many(
-        where={"meetingId": meeting_id, "verificationStatus": "PENDING"},
+        where={"meetingId": meeting_id, "verificationStatus": "NEEDS_REVIEW"},
     )
     for task in tasks:
         verify_task.delay(task.id)
     
     task_count = len(final_state.final_tasks) if final_state.final_tasks else 0
     logger.info(f"Extraction pipeline created {task_count} tasks for meeting {meeting_id}")
+    
+    # Check if pipeline was interrupted for HITL
+    if final_state.interrupted:
+        logger.info(f"Pipeline interrupted for HITL: {meeting_id}, reason: {final_state.interrupt_reason}")
+        # Emit event for frontend notification
+        from app.services.kafka_events import kafka_event_publisher
+        await kafka_event_publisher.publish("hitl-events", {
+            "type": "pipeline.interrupted",
+            "meeting_id": meeting_id,
+            "tenant_id": meeting.tenantId,
+            "payload": {
+                "interrupt_node": final_state.interrupt_node,
+                "interrupt_reason": final_state.interrupt_reason,
+                "interrupt_payload": final_state.interrupt_payload,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        })
     
     return {"tasks_created": task_count, "meeting_id": meeting_id}
 

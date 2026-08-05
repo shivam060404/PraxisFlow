@@ -7,6 +7,7 @@ import os
 import json
 import time
 import uuid
+import logging
 from contextlib import contextmanager
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
@@ -375,6 +376,31 @@ class GenAITracer:
             self.extraction_accuracy.record(hallucination_score, labels | {"metric": "hallucination"})
         if faithfulness_score is not None:
             self.extraction_accuracy.record(faithfulness_score, labels | {"metric": "faithfulness"})
+
+    def log_pipeline_step(self, step: str, status: str, **kwargs):
+        """Log pipeline step execution with trace context."""
+        from opentelemetry import trace
+        span = trace.get_current_span()
+        if span and span.is_recording():
+            span.add_event(f"pipeline.{step}.{status}", attributes=kwargs)
+        
+        # Also log via structured logger
+        logger = logging.getLogger("praxisflow.pipeline")
+        context = self._get_trace_context() if hasattr(self, '_get_trace_context') else {}
+        logger.info(
+            f"Pipeline step: {step} - {status}",
+            extra={**context, "pipeline_step": step, "status": status, **kwargs}
+        )
+
+    def _get_trace_context(self) -> Dict[str, str]:
+        """Extract current trace context for logging."""
+        from opentelemetry import trace
+        span = trace.get_current_span()
+        if span and span.get_span_context().trace_id:
+            trace_id = format(span.get_span_context().trace_id, '032x')
+            span_id = format(span.get_span_context().span_id, '016x')
+            return {"trace_id": trace_id, "span_id": span_id}
+        return {}
 
     def _record_duration(self, attrs: LLMCallAttributes, duration_ms: float):
         labels = {
