@@ -194,9 +194,20 @@ class GenAITracer:
     """High-level tracer for GenAI operations with GenAI semantic conventions."""
 
     def __init__(self):
-        self.tracer = otel_manager.tracer
-        self.meter = otel_manager.meter
-        self._create_metrics()
+        self._metrics_created = False
+
+    @property
+    def tracer(self):
+        return otel_manager.tracer or trace.get_tracer(__name__)
+
+    @property
+    def meter(self):
+        return otel_manager.meter or metrics.get_meter(__name__)
+
+    def _ensure_metrics(self):
+        if not self._metrics_created and otel_manager.meter:
+            self._create_metrics()
+            self._metrics_created = True
 
     def _create_metrics(self):
         """Create GenAI metrics instruments."""
@@ -313,6 +324,7 @@ class GenAITracer:
         cost_usd: float = 0.0,
     ):
         """Record LLM response attributes on span."""
+        self._ensure_metrics()
         span.set_attributes({
             GENAI_RESPONSE_MODEL: response_model,
             GENAI_RESPONSE_FINISH_REASONS: finish_reasons,
@@ -338,6 +350,7 @@ class GenAITracer:
 
     def record_guardrail_action(self, attrs: LLMCallAttributes, action: str, guardrail_name: str):
         """Record a guardrail trigger."""
+        self._ensure_metrics()
         span = trace.get_current_span()
         if span and span.is_recording():
             current = span.attributes.get(PF_GUARDRAIL_ACTIONS, [])
@@ -364,6 +377,7 @@ class GenAITracer:
         faithfulness_score: Optional[float] = None,
     ):
         """Record pipeline execution metrics."""
+        self._ensure_metrics()
         labels = {
             "tenant_id": tenant_id,
             "verification_status": verification_status,
@@ -403,6 +417,7 @@ class GenAITracer:
         return {}
 
     def _record_duration(self, attrs: LLMCallAttributes, duration_ms: float):
+        self._ensure_metrics()
         labels = {
             "system": attrs.system,
             "model": attrs.model,
@@ -412,6 +427,7 @@ class GenAITracer:
         self.llm_request_duration.record(duration_ms, labels)
 
     def _record_error(self, attrs: LLMCallAttributes, error: str):
+        self._ensure_metrics()
         labels = {
             "system": attrs.system,
             "model": attrs.model,

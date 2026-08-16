@@ -18,8 +18,7 @@ qdrant-client==1.12.0
 neo4j==5.24.0
 
 # Message Queue
-aiokafka==0.10.0
-faust-streaming==0.10.4
+aiokafka==0.11.0
 
 # Redis
 redis==5.0.8
@@ -35,24 +34,9 @@ langchain==0.3.11
 langchain-groq==0.2.2
 langchain-openai==0.2.1
 langgraph==0.2.38
-llama-index==0.12.13
-llama-index-vector-stores-qdrant==0.3.2
-llama-index-graph-stores-neo4j==0.2.3
-litellm==1.52.6
-
-# LLM Gateway & Guardrails
-nemoguardrails==1.0.5
-
-# Observability
-langfuse==2.70.0
-opentelemetry-api==1.26.0
-opentelemetry-sdk==1.26.0
-opentelemetry-exporter-otlp==1.26.0
-opentelemetry-instrumentation-fastapi==0.46b0
-opentelemetry-instrumentation-requests==0.46b0
-opentelemetry-instrumentation-redis==0.46b0
-opentelemetry-instrumentation-kafka==0.46b0
-opentelemetry-instrumentation-psycopg2==0.46b0
+llama-index>=0.12.0,<0.13.0
+llama-index-vector-stores-qdrant>=0.4.0
+llama-index-graph-stores-neo4j>=0.3.0
 
 # Embeddings
 openai==1.47.1
@@ -69,7 +53,7 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
 # Monitoring
-prometheus-client==0.19.1
+prometheus-client==0.21.1
 structlog==24.1.0
 
 # Task Queue

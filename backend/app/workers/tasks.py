@@ -11,7 +11,7 @@ from app.services.asr import transcribe_meeting
 from app.services.storage import storage_service
 from app.workers.celery_app import celery_app, async_task
 from app.agents.schemas import TranscriptChunk
-from app.agents.graph_runner import run_extraction_pipeline_wrapper
+from app.agents.graph_runner import run_extraction_pipeline
 
 logger = logging.getLogger(__name__)
 
