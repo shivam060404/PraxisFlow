@@ -86,8 +86,9 @@ class LLMGatewayClient:
             os.environ["GROQ_API_KEY"] = settings.GROQ_API_KEY
         if settings.OPENAI_API_KEY:
             os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
-        if settings.ANTHROPIC_API_KEY:
-            os.environ["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
+        anthropic_key = getattr(settings, "ANTHROPIC_API_KEY", None)
+        if anthropic_key:
+            os.environ["ANTHROPIC_API_KEY"] = anthropic_key
 
         # Register callbacks
         litellm.success_callback = [litellm_post_call_hook]

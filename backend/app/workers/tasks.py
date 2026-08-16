@@ -19,9 +19,11 @@ def run_async(coro):
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
     if loop.is_closed():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
     return loop.run_until_complete(coro)
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ def process_meeting(self, meeting_id: str):
     logger.info(f"Starting meeting processing: {meeting_id}")
     
     try:
-        result = asyncio.run(_process_meeting_async(meeting_id))
+        result = run_async(_process_meeting_async(meeting_id))
         logger.info(f"Meeting processing completed: {meeting_id}")
         return result
     except Exception as e:
@@ -43,7 +45,7 @@ def process_meeting(self, meeting_id: str):
             self.retry(exc=e)
         except MaxRetriesExceededError:
             # Mark meeting as error
-            asyncio.run(_mark_meeting_error(meeting_id, str(e)))
+            run_async(_mark_meeting_error(meeting_id, str(e)))
             raise
 
 
@@ -113,7 +115,7 @@ def run_extraction(self, meeting_id: str):
     logger.info(f"Running extraction for meeting: {meeting_id}")
     
     try:
-        result = asyncio.run(_run_extraction_async(meeting_id))
+        result = run_async(_run_extraction_async(meeting_id))
         logger.info(f"Extraction completed: {meeting_id}")
         return result
     except Exception as e:
@@ -122,7 +124,7 @@ def run_extraction(self, meeting_id: str):
         try:
             self.retry(exc=e)
         except MaxRetriesExceededError:
-            asyncio.run(_mark_extraction_failed(meeting_id, str(e)))
+            run_async(_mark_extraction_failed(meeting_id, str(e)))
             raise
 
 
@@ -197,12 +199,12 @@ async def _run_extraction_async(meeting_id: str):
     for task in tasks:
         verify_task.delay(task.id)
     
-    task_count = len(final_state.final_tasks) if final_state.final_tasks else 0
+    task_count = len(final_state.get("final_tasks", [])) if final_state.get("final_tasks") else 0
     logger.info(f"Extraction pipeline created {task_count} tasks for meeting {meeting_id}")
     
     # Check if pipeline was interrupted for HITL
-    if final_state.interrupted:
-        logger.info(f"Pipeline interrupted for HITL: {meeting_id}, reason: {final_state.interrupt_reason}")
+    if final_state.get("interrupted"):
+        logger.info(f"Pipeline interrupted for HITL: {meeting_id}, reason: {final_state.get('interrupt_reason')}")
         # Emit event for frontend notification
         from app.services.kafka_events import kafka_event_publisher
         await kafka_event_publisher.publish("hitl-events", {
@@ -210,9 +212,9 @@ async def _run_extraction_async(meeting_id: str):
             "meeting_id": meeting_id,
             "tenant_id": meeting.tenantId,
             "payload": {
-                "interrupt_node": final_state.interrupt_node,
-                "interrupt_reason": final_state.interrupt_reason,
-                "interrupt_payload": final_state.interrupt_payload,
+                "interrupt_node": final_state.get("interrupt_node"),
+                "interrupt_reason": final_state.get("interrupt_reason"),
+                "interrupt_payload": final_state.get("interrupt_payload"),
             },
             "timestamp": datetime.utcnow().isoformat(),
         })
@@ -238,7 +240,7 @@ def verify_task(self, task_id: str):
     logger.info(f"Verifying task: {task_id}")
     
     try:
-        result = asyncio.run(_verify_task_async(task_id))
+        result = run_async(_verify_task_async(task_id))
         logger.info(f"Verification completed: {task_id}")
         return result
     except Exception as e:
@@ -247,7 +249,7 @@ def verify_task(self, task_id: str):
         try:
             self.retry(exc=e)
         except MaxRetriesExceededError:
-            asyncio.run(_mark_verification_failed(task_id, str(e)))
+            run_async(_mark_verification_failed(task_id, str(e)))
             raise
 
 

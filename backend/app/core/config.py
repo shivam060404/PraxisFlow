@@ -71,9 +71,9 @@ class Settings(BaseSettings):
     DEEPGRAM_PARAGRAPHS: bool = True
 
     # LLM Settings
-    EXTRACTION_MODEL: str = "llama-3.3-70b-versatile"
+    EXTRACTION_MODEL: str = "groq/llama-3.3-70b-versatile"
     EXTRACTION_TEMPERATURE: float = 0.1
-    VERIFICATION_MODEL: str = "llama-3.3-70b-versatile"
+    VERIFICATION_MODEL: str = "groq/llama-3.3-70b-versatile"
     VERIFICATION_TEMPERATURE: float = 0.0
     EMBEDDING_MODEL: str = "text-embedding-3-large"
     EMBEDDING_DIMENSIONS: int = 3072

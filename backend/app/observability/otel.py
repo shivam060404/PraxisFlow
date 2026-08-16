@@ -205,7 +205,7 @@ class GenAITracer:
         return otel_manager.meter or metrics.get_meter(__name__)
 
     def _ensure_metrics(self):
-        if not self._metrics_created and otel_manager.meter:
+        if not self._metrics_created:
             self._create_metrics()
             self._metrics_created = True
 
@@ -365,7 +365,7 @@ class GenAITracer:
         }
         self.guardrail_triggers.add(1, labels)
 
-    def record_pipeline_execution(
+    def record_pipeline_metrics(
         self,
         pipeline_run_id: str,
         tenant_id: str,
@@ -378,6 +378,8 @@ class GenAITracer:
     ):
         """Record pipeline execution metrics."""
         self._ensure_metrics()
+        if not self._metrics_created:
+            return
         labels = {
             "tenant_id": tenant_id,
             "verification_status": verification_status,
@@ -418,6 +420,8 @@ class GenAITracer:
 
     def _record_duration(self, attrs: LLMCallAttributes, duration_ms: float):
         self._ensure_metrics()
+        if not self._metrics_created:
+            return
         labels = {
             "system": attrs.system,
             "model": attrs.model,
@@ -428,6 +432,8 @@ class GenAITracer:
 
     def _record_error(self, attrs: LLMCallAttributes, error: str):
         self._ensure_metrics()
+        if not self._metrics_created:
+            return
         labels = {
             "system": attrs.system,
             "model": attrs.model,

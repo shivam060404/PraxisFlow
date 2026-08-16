@@ -176,18 +176,24 @@ class DeepgramASRService:
         """Save transcript to database."""
         db = await get_prisma()
         
-        # Create transcript record
-        await db.transcript.create(
-            data={
-                "id": transcript.id,
-                "meetingId": transcript.meeting_id,
-                "fullText": transcript.full_text,
-                "language": transcript.language,
-                "wordCount": transcript.word_count,
-                "durationMs": transcript.duration_ms,
-                "redactionApplied": transcript.redaction_applied,
-            }
-        )
+        from prisma.errors import UniqueViolationError
+        try:
+            # Create transcript record
+            await db.transcript.create(
+                data={
+                    "id": transcript.id,
+                    "meetingId": transcript.meeting_id,
+                    "fullText": transcript.full_text,
+                    "language": transcript.language,
+                    "wordCount": transcript.word_count,
+                    "durationMs": transcript.duration_ms,
+                    "redactionApplied": transcript.redaction_applied,
+                }
+            )
+        except UniqueViolationError:
+            # If transcript was already created by another concurrent task, just skip
+            logger.warning(f"Transcript already exists for meeting {transcript.meeting_id}, skipping persistence.")
+            return
         
         # Create utterances
         if transcript.utterances:

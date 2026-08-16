@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Any
 from datetime import datetime
 from uuid import UUID
 from enum import Enum
@@ -7,13 +7,21 @@ import uuid
 
 
 # ─── Base Models ───
+from pydantic.alias_generators import to_camel
 
-class TimestampMixin(BaseModel):
+class BaseModelConfig(BaseModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        populate_by_name=True,
+        alias_generator=to_camel,
+    )
+
+class TimestampMixin(BaseModelConfig):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-class UUIDMixin(BaseModel):
+class UUIDMixin(BaseModelConfig):
     id: UUID = Field(default_factory=uuid.uuid4)
 
 
@@ -119,7 +127,7 @@ class UserResponse(User):
     pass
 
 
-class MeetingBase(BaseModel):
+class MeetingBase(BaseModelConfig):
     title: str
     description: Optional[str] = None
     scheduled_at: datetime
@@ -392,7 +400,7 @@ class MeetingFlag(MeetingFlagBase, UUIDMixin):
 # ─── Response Models ───
 
 class PaginatedResponse(BaseModel):
-    items: List[BaseModel]
+    items: List[Any]
     total: int
     page: int
     page_size: int

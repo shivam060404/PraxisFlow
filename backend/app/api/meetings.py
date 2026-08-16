@@ -56,51 +56,56 @@ async def upload_meeting(
             detail=f"Unsupported file type: {file.content_type}",
         )
     
-    # Validate file size
-    file_size = 0
-    chunk_size = 1024 * 1024  # 1MB chunks
-    while chunk := await file.read(chunk_size):
-        file_size += len(chunk)
-        if file_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File size exceeds {settings.MAX_FILE_SIZE_MB}MB limit",
-            )
-    
-    # Reset file pointer
-    await file.seek(0)
-    
-    # Upload to MinIO
-    storage = StorageService()
-    meeting_id = uuid.uuid4()
-    object_name = f"{tenant_id}/{meeting_id}/{file.filename}"
-    
-    audio_url = await storage.upload_file(
-        bucket=settings.MINIO_BUCKET_AUDIO,
-        object_name=object_name,
-        file=file.file,
-        content_type=file.content_type,
-    )
-    
-    # Create meeting record
-    meeting = await db.meeting.create(
-        data={
-            "id": str(meeting_id),
-            "tenantId": tenant_id,
-            "title": title,
-            "description": description,
-            "scheduledAt": datetime.fromisoformat(scheduled_at.replace('Z', '+00:00')),
-            "durationMinutes": duration_minutes,
-            "audioUrl": audio_url,
-            "recordingSource": "upload",
-            "status": "UPLOADED",
-        }
-    )
-    
-    # Queue processing job
-    process_meeting.delay(str(meeting_id))
-    
-    return meeting
+    try:
+        # Validate file size
+        file_size = 0
+        chunk_size = 1024 * 1024  # 1MB chunks
+        while chunk := await file.read(chunk_size):
+            file_size += len(chunk)
+            if file_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File size exceeds {settings.MAX_FILE_SIZE_MB}MB limit",
+                )
+        
+        # Reset file pointer
+        await file.seek(0)
+        
+        # Upload to MinIO
+        storage = StorageService()
+        meeting_id = uuid.uuid4()
+        object_name = f"{tenant_id}/{meeting_id}/{file.filename}"
+        
+        audio_url = await storage.upload_file(
+            bucket=settings.MINIO_BUCKET_AUDIO,
+            object_name=object_name,
+            file=file.file,
+            content_type=file.content_type,
+        )
+        
+        # Create meeting record
+        meeting = await db.meeting.create(
+            data={
+                "id": str(meeting_id),
+                "tenantId": tenant_id,
+                "title": title,
+                "description": description,
+                "scheduledAt": datetime.fromisoformat(scheduled_at.replace('Z', '+00:00')),
+                "durationMinutes": duration_minutes,
+                "audioUrl": audio_url,
+                "recordingSource": "upload",
+                "status": "UPLOADED",
+            }
+        )
+        
+        # Queue processing job
+        process_meeting.delay(str(meeting_id))
+        
+        return meeting
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("", response_model=PaginatedResponse)
@@ -280,7 +285,7 @@ async def get_meeting_status(
     """Get meeting processing status."""
     meeting = await db.meeting.find_unique(
         where={"id": str(meeting_id)},
-        include={"transcript": True, "_count": {"select": {"tasks": True}}},
+        include={"transcript": True},
     )
     if not meeting:
         raise HTTPException(
@@ -288,10 +293,12 @@ async def get_meeting_status(
             detail="Meeting not found",
         )
     
+    task_count = await db.task.count(where={"meetingId": str(meeting_id)})
+    
     return {
         "meeting_id": str(meeting_id),
         "status": meeting.status,
         "has_transcript": meeting.transcript is not None,
-        "task_count": meeting._count.tasks if meeting._count else 0,
+        "tasks_count": task_count,
         "updated_at": meeting.updatedAt,
     }

@@ -90,7 +90,7 @@ Identify and merge duplicates. Two tasks are duplicates if they refer to the sam
 
 For each group of duplicates, keep the one with the highest confidence and merge the transcript spans (earliest start, latest end).
 
-Return the deduplicated list of tasks."""
+Return the deduplicated list of tasks as valid JSON matching the schema."""
 
 
 JSON_REPAIR_PROMPT = """The previous LLM output failed Pydantic validation. Here is the error:
@@ -176,8 +176,14 @@ async def _parse_json_with_repair(
     
     for attempt in range(JSON_REPAIR_MAX_ATTEMPTS):
         try:
+            # Strip markdown code blocks if present
+            cleaned_content = content.strip()
+            if cleaned_content.startswith("```"):
+                import re
+                cleaned_content = re.sub(r"^```(?:json)?\n|\n```$", "", cleaned_content, flags=re.IGNORECASE)
+            
             # Try direct parsing first
-            data = json.loads(content)
+            data = json.loads(cleaned_content)
             return schema_model.model_validate(data)
             
         except json.JSONDecodeError as e:
@@ -205,8 +211,9 @@ async def _parse_json_with_repair(
             ]
             
             try:
+                role_map = {"human": "user", "ai": "assistant", "system": "system"}
                 repaired_content = await _call_gateway_with_retry(
-                    messages=[{"role": m.type, "content": m.content} for m in repair_messages],
+                    messages=[{"role": role_map.get(m.type, m.type), "content": m.content} for m in repair_messages],
                     pipeline_node=f"{pipeline_node}_repair",
                     state=state,
                     temperature=0.0,
@@ -810,10 +817,37 @@ async def persistence_node(state: ExtractionState) -> ExtractionState:
                     verification_status=VerificationStatus(task.verification_status),
                     verification_reasoning=task.verification_reasoning,
                     extraction_confidence=task.confidence,
-                    status=initial_status,
                 )
                 
-                created = await db.task.create(data=task_create.model_dump())
+                data = task_create.model_dump(exclude_none=True)
+                
+                # Map to camelCase for Prisma and stringify UUIDs
+                prisma_data = {
+                    "tenantId": str(data["tenant_id"]),
+                    "meetingId": str(data["meeting_id"]),
+                    "title": data["title"],
+                    "description": data["description"],
+                    "taskType": data["task_type"],
+                    "status": initial_status.value if hasattr(initial_status, 'value') else initial_status,
+                    "priority": data.get("priority"),
+                    "assigneeHint": data.get("assignee_hint"),
+                    "assigneeId": str(data["assignee_id"]) if data.get("assignee_id") else None,
+                    "deadlineHint": data.get("deadline_hint"),
+                    "transcriptWordStart": data["transcript_word_start"],
+                    "transcriptWordEnd": data["transcript_word_end"],
+                    "sourceQuote": data["source_quote"],
+                    "verificationStatus": data["verification_status"],
+                    "verificationReasoning": data.get("verification_reasoning"),
+                    "extractionConfidence": data["extraction_confidence"],
+                    "externalId": data.get("external_id"),
+                    "externalUrl": data.get("external_url"),
+                    "integrationId": str(data["integration_id"]) if data.get("integration_id") else None,
+                }
+                
+                # Remove None values so Prisma defaults can apply
+                prisma_data = {k: v for k, v in prisma_data.items() if v is not None}
+                
+                created = await db.task.create(data=prisma_data)
                 created_tasks.append(created)
                 
                 # Update task_id in HITL payload if this was the interrupted task
@@ -867,8 +901,6 @@ def build_extraction_graph() -> StateGraph:
     memory = MemorySaver()
     app = workflow.compile(
         checkpointer=memory,
-        interrupt_before=["verification"],  # Allow interrupt before verification
-        interrupt_after=["verification"],   # Allow interrupt after verification (for HITL)
     )
     
     return app
