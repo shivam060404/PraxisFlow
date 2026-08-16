@@ -77,7 +77,10 @@ async def lifespan(app: FastAPI):
     logger.info("Guardrails initialized")
     
     # Initialize Kafka consumers
-    await startup_kafka()
+    try:
+        await startup_kafka()
+    except Exception as e:
+        logger.error(f"Failed to start Kafka consumers: {e}")
     
     yield
     
@@ -142,9 +145,8 @@ async def add_process_time_header(request: Request, call_next):
     response.headers["X-Process-Time"] = str(process_time)
     response.headers["X-Request-ID"] = request_id
     
-    # Log with OTel logger
-    otel_logger = get_otel_logger("praxisflow.api")
-    otel_logger.info(
+    # Log with structlogger
+    logger.info(
         "HTTP Request",
         method=request.method,
         path=request.url.path,

@@ -280,7 +280,7 @@ async def get_current_subject(request: Request) -> Subject:
     )
 
 
-async def require_permission(permission: Permission):
+def require_permission(permission: Permission):
     """FastAPI dependency to require a specific permission."""
     async def checker(request: Request, subject = Depends(get_current_subject)) -> Subject:
         authz = get_authorization_service()

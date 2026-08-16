@@ -7,7 +7,9 @@ import os
 import logging
 import hvac
 import boto3
+import json
 from typing import Dict, Any, Optional, List
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from contextlib import contextmanager
 from functools import lru_cache

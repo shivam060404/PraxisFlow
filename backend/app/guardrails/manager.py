@@ -59,7 +59,7 @@ class GuardrailsManager:
             InputPIIScanner(enabled=True, action="redact"),
             TopicBoundaryGuard(enabled=True),
             JailbreakDetector(enabled=True),
-            InputLengthValidator(max_tokens=8000, enabled=True),
+            InputLengthValidator(max_tokens_estimate=8000, enabled=True),
             TenantIsolationGuard(enabled=True),
         ]
 

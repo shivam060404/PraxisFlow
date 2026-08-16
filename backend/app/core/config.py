@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     CLERK_PUBLISHABLE_KEY: Optional[str] = None
     CLERK_SECRET_KEY: Optional[str] = None
 
+    # Langfuse
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[str] = None
+    LANGFUSE_HOST: str = "http://localhost:3000"
+
     # Deepgram Options
     DEEPGRAM_MODEL: str = "nova-2"
     DEEPGRAM_LANGUAGE: str = "en"

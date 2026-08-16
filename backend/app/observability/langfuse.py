@@ -12,7 +12,6 @@ from datetime import datetime
 from contextlib import contextmanager
 
 from langfuse import Langfuse
-from langfuse.model import CreateTrace, CreateGeneration, CreateSpan, CreateScore, CreateEvent
 
 from app.core.config import settings
 
@@ -70,13 +69,11 @@ class LangfuseClient:
     ) -> str:
         """Create a new trace."""
         trace = self.client.trace(
-            CreateTrace(
-                name=name,
-                user_id=user_id,
-                session_id=session_id,
-                metadata=metadata or {},
-                tags=tags or [],
-            )
+            name=name,
+            user_id=user_id,
+            session_id=session_id,
+            metadata=metadata or {},
+            tags=tags or [],
         )
         self._traces[name] = trace.id
         return trace.id
@@ -102,20 +99,18 @@ class LangfuseClient:
     ) -> str:
         """Create a generation (LLM call) within a trace."""
         gen = self.client.generation(
-            CreateGeneration(
-                trace_id=trace_id,
-                name=name,
-                model=model,
-                model_parameters=model_parameters,
-                prompt=prompt,
-                completion=completion,
-                usage=usage,
-                cost=cost,
-                finish_reason=finish_reason,
-                metadata=metadata or {},
-                start_time=start_time or datetime.utcnow(),
-                end_time=end_time or datetime.utcnow(),
-            )
+            trace_id=trace_id,
+            name=name,
+            model=model,
+            model_parameters=model_parameters,
+            prompt=prompt,
+            completion=completion,
+            usage=usage,
+            cost=cost,
+            finish_reason=finish_reason,
+            metadata=metadata or {},
+            start_time=start_time or datetime.utcnow(),
+            end_time=end_time or datetime.utcnow(),
         )
         return gen.id
 
@@ -129,13 +124,11 @@ class LangfuseClient:
     ) -> str:
         """Create a span within a trace."""
         span = self.client.span(
-            CreateSpan(
-                trace_id=trace_id,
-                name=name,
-                input=input_data,
-                output=output_data,
-                metadata=metadata or {},
-            )
+            trace_id=trace_id,
+            name=name,
+            input=input_data,
+            output=output_data,
+            metadata=metadata or {},
         )
         return span.id
 
@@ -150,14 +143,12 @@ class LangfuseClient:
     ) -> str:
         """Create a score/evaluation for a trace or observation."""
         score = self.client.score(
-            CreateScore(
-                trace_id=trace_id,
-                name=name,
-                value=value,
-                comment=comment,
-                data_type=data_type,
-                observation_id=observation_id,
-            )
+            trace_id=trace_id,
+            name=name,
+            value=value,
+            comment=comment,
+            data_type=data_type,
+            observation_id=observation_id,
         )
         return score.id
 
@@ -171,13 +162,11 @@ class LangfuseClient:
     ) -> str:
         """Create an event within a trace."""
         event = self.client.event(
-            CreateEvent(
-                trace_id=trace_id,
-                name=name,
-                input=input_data,
-                output=output_data,
-                metadata=metadata or {},
-            )
+            trace_id=trace_id,
+            name=name,
+            input=input_data,
+            output=output_data,
+            metadata=metadata or {},
         )
         return event.id
 

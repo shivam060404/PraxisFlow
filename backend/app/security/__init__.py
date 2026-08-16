@@ -65,6 +65,8 @@ from app.security.middleware import (
     SecurityHeadersMiddleware,
     RequestValidationMiddleware,
     AuditLoggingMiddleware,
+    get_cors_config,
+    build_security_middleware_stack,
 )
 
 __all__ = [
@@ -127,4 +129,6 @@ __all__ = [
     "SecurityHeadersMiddleware",
     "RequestValidationMiddleware",
     "AuditLoggingMiddleware",
+    "get_cors_config",
+    "build_security_middleware_stack",
 ]

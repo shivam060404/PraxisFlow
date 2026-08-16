@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Literal
 from datetime import datetime
 from uuid import UUID
+from enum import Enum
 import uuid
 
 
@@ -18,7 +19,7 @@ class UUIDMixin(BaseModel):
 
 # ─── Enums ───
 
-class MeetingStatus(str):
+class MeetingStatus(str, Enum):
     UPLOADED = "UPLOADED"
     PROCESSING = "PROCESSING"
     TRANSCRIBED = "TRANSCRIBED"
@@ -27,7 +28,7 @@ class MeetingStatus(str):
     ERROR = "ERROR"
 
 
-class TaskStatus(str):
+class TaskStatus(str, Enum):
     EXTRACTED = "EXTRACTED"
     PENDING_REVIEW = "PENDING_REVIEW"
     VERIFIED = "VERIFIED"
@@ -39,28 +40,28 @@ class TaskStatus(str):
     DISMISSED = "DISMISSED"
 
 
-class TaskType(str):
+class TaskType(str, Enum):
     ACTION_ITEM = "ACTION_ITEM"
     DECISION = "DECISION"
     FOLLOW_UP = "FOLLOW_UP"
     BLOCKER = "BLOCKER"
 
 
-class VerificationStatus(str):
+class VerificationStatus(str, Enum):
     PENDING = "PENDING"
     VERIFIED = "VERIFIED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
 
 
-class SyncStatus(str):
+class SyncStatus(str, Enum):
     PENDING = "PENDING"
     SYNCED = "SYNCED"
     SYNC_FAILED = "SYNC_FAILED"
     CONFLICT = "CONFLICT"
 
 
-class IntegrationProvider(str):
+class IntegrationProvider(str, Enum):
     JIRA = "jira"
     ASANA = "asana"
     LINEAR = "linear"
@@ -68,7 +69,7 @@ class IntegrationProvider(str):
     TEAMS = "teams"
 
 
-class Priority(str):
+class Priority(str, Enum):
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     LOW = "LOW"
@@ -103,9 +104,19 @@ class UserCreate(UserBase):
     tenant_id: UUID
 
 
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    role: Optional[str] = None
+
+
 class User(UserBase, UUIDMixin, TimestampMixin):
     tenant_id: UUID
     model_config = ConfigDict(from_attributes=True)
+
+
+class UserResponse(User):
+    pass
 
 
 class MeetingBase(BaseModel):
@@ -324,6 +335,11 @@ class Integration(IntegrationBase, UUIDMixin, TimestampMixin):
     status: str = "ACTIVE"
     model_config = ConfigDict(from_attributes=True)
 
+
+class WebhookEvent(BaseModel):
+    event: str
+    payload: dict
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 # ─── AI Audit Models ───
 

@@ -12,7 +12,7 @@ from datetime import datetime
 from contextlib import contextmanager
 
 from langfuse import Langfuse
-from langfuse.api.resources.commons.errors import ApiError
+
 
 from app.core.config import settings
 
@@ -107,7 +107,7 @@ class LangfuseClient:
                 output=trace_data.output,
             )
             return trace.id
-        except ApiError as e:
+        except Exception as e:
             logger.error(f"Failed to create trace: {e}")
             return str(uuid.uuid4())
 
@@ -145,7 +145,7 @@ class LangfuseClient:
                 )
 
             return generation.id
-        except ApiError as e:
+        except Exception as e:
             logger.error(f"Failed to create generation: {e}")
             return str(uuid.uuid4())
 
@@ -170,7 +170,7 @@ class LangfuseClient:
                 metadata=output_data.metadata,
                 finish_reason=output_data.finish_reason,
             )
-        except ApiError as e:
+        except Exception as e:
             logger.error(f"Failed to update generation: {e}")
 
     def score_generation(
@@ -195,7 +195,7 @@ class LangfuseClient:
                 comment=comment,
                 metadata=metadata,
             )
-        except ApiError as e:
+        except Exception as e:
             logger.error(f"Failed to score generation: {e}")
 
     def create_span(
@@ -221,7 +221,7 @@ class LangfuseClient:
                 parent_observation_id=parent_observation_id,
             )
             return span.id
-        except ApiError as e:
+        except Exception as e:
             logger.error(f"Failed to create span: {e}")
             return str(uuid.uuid4())
 
@@ -244,7 +244,7 @@ class LangfuseClient:
                 output=output_data,
                 metadata=metadata,
             )
-        except ApiError as e:
+        except Exception as e:
             logger.error(f"Failed to end span: {e}")
 
     def flush(self):

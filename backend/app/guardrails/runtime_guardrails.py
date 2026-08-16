@@ -4,7 +4,7 @@ These run DURING the LLM call via NeMo Guardrails or as pre-call checks.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union, List
 from dataclasses import dataclass
 
 from app.guardrails.base import BaseGuardrail, GuardrailAction, GuardrailLayer, GuardrailSeverity, GuardrailResult, GuardrailContext

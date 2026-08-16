@@ -84,3 +84,5 @@ IntegrationAdapterFactory.register("teams", TeamsAdapter)
 IntegrationAdapterFactory.register("github", GitHubAdapter)
 IntegrationAdapterFactory.register("salesforce", SalesforceAdapter)
 IntegrationAdapterFactory.register("notion", NotionAdapter)
+IntegrationFactory = IntegrationAdapterFactory
+
