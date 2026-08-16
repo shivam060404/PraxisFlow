@@ -58,5 +58,13 @@ def shutdown_worker(**kwargs):
 def async_task(task_func):
     """Decorator to run async functions in Celery tasks."""
     def wrapper(*args, **kwargs):
-        return asyncio.run(task_func(*args, **kwargs))
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(task_func(*args, **kwargs))
     return wrapper

@@ -413,6 +413,14 @@ cd backend
 pytest tests/ -v --cov=app --cov-report=term-missing
 ```
 
+### End-to-End Testing
+To verify the entire pipeline (FastAPI + Celery + LLM Extraction), run the provided E2E test script:
+```bash
+cd backend
+python /scratch/e2e_test.py
+```
+This script uploads a dummy meeting, triggers processing, polls the API for status updates, and fetches the resulting extracted tasks.
+
 ### Database Migrations
 ```bash
 cd backend

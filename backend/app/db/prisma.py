@@ -15,17 +15,35 @@ async def get_prisma() -> Prisma:
     """Get or create Prisma client instance."""
     global prisma_client
     if prisma_client is None:
-        prisma_client = Prisma(
-            datasource={
-                "url": settings.DATABASE_URL
-            },
-            auto_register=True,
-            log_queries=settings.LOG_LEVEL == "DEBUG",
-        )
-        await prisma_client.connect()
+        from prisma import get_client
+        from prisma.errors import ClientNotRegisteredError
+        try:
+            prisma_client = get_client()
+        except ClientNotRegisteredError:
+            prisma_client = Prisma(
+                datasource={
+                    "url": settings.DATABASE_URL
+                },
+                auto_register=True,
+                log_queries=settings.LOG_LEVEL == "DEBUG",
+            )
+        if not prisma_client.is_connected():
+            import sys
+            has_fileno = hasattr(sys.stdout, 'fileno')
+            if not has_fileno:
+                sys.stdout.fileno = lambda: 1
+            await prisma_client.connect()
+            if not has_fileno:
+                del sys.stdout.fileno
         logger.info("Prisma client connected")
     elif not prisma_client.is_connected():
+        import sys
+        has_fileno = hasattr(sys.stdout, 'fileno')
+        if not has_fileno:
+            sys.stdout.fileno = lambda: 1
         await prisma_client.connect()
+        if not has_fileno:
+            del sys.stdout.fileno
         logger.info("Prisma client reconnected")
     return prisma_client
 

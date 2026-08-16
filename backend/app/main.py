@@ -9,6 +9,7 @@ import time
 import uuid
 
 from app.core.config import settings
+from app.workers.celery_app import celery_app
 from app.db.prisma import get_prisma, close_prisma, set_tenant_context, get_db
 from app.schemas import HealthResponse, ErrorResponse
 from app.workers.kafka_consumers import startup_kafka, shutdown_kafka
@@ -179,7 +180,7 @@ async def general_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception", path=request.url.path, error=str(exc))
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal server error"},
+        content={"detail": str(exc)},
     )
 
 

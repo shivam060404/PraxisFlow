@@ -13,6 +13,17 @@ from app.workers.celery_app import celery_app, async_task
 from app.agents.schemas import TranscriptChunk
 from app.agents.graph_runner import run_extraction_pipeline
 
+def run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,17 +64,21 @@ async def _process_meeting_async(meeting_id: str):
     
     # Step 1: Transcribe (if not already transcribed)
     if meeting.status in ["UPLOADED", "PROCESSING"]:
-        transcript = await transcribe_meeting(
-            audio_url=meeting.audioUrl,
-            meeting_id=meeting_id,
-            tenant_id=meeting.tenantId,
-        )
-        
-        # Update meeting status
-        await db.meeting.update(
-            where={"id": meeting_id},
-            data={"status": "TRANSCRIBED"},
-        )
+        # Check if transcript already exists (e.g. on retry)
+        existing_transcript = await db.transcript.find_first(where={"meetingId": meeting_id})
+        if not existing_transcript:
+            transcript = await transcribe_meeting(
+                audio_url=meeting.audioUrl,
+                meeting_id=meeting_id,
+                tenant_id=meeting.tenantId,
+            )
+            # Update meeting status
+            await db.meeting.update(
+                where={"id": meeting_id},
+                data={"status": "TRANSCRIBED"},
+            )
+        else:
+            logger.info(f"Transcript already exists for meeting {meeting_id}, skipping transcription")
     
     # Step 2: Run extraction pipeline
     run_extraction.delay(meeting_id)
@@ -155,8 +170,8 @@ async def _run_extraction_async(meeting_id: str):
         ))
     
     # Get a user_id for the pipeline (use meeting organizer or first attendee)
-    user_id = meeting.organizerId
-    if not user_id and meeting.attendees:
+    user_id = getattr(meeting, 'organizerId', None)
+    if not user_id and getattr(meeting, 'attendees', None):
         user_id = meeting.attendees[0].userId
     if not user_id:
         # Fallback: get any user from tenant
@@ -165,7 +180,7 @@ async def _run_extraction_async(meeting_id: str):
     
     # Run the full LangGraph extraction pipeline
     # This runs: chunking → extraction → dedup → verification → entity_resolution → persistence
-    final_state = await run_extraction_pipeline_wrapper(
+    final_state = await run_extraction_pipeline(
         meeting_id=meeting_id,
         tenant_id=meeting.tenantId,
         user_id=user_id,

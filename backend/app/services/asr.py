@@ -67,9 +67,21 @@ class DeepgramASRService:
         logger.info(f"Starting transcription for meeting {meeting_id}")
         
         try:
-            # Call Deepgram API
-            response = await self.client.listen.async_prerecorded.v("1").transcribe_url(
-                {"url": audio_url},
+            import httpx
+            # Download audio locally since Deepgram cannot access localhost URLs
+            logger.info(f"Downloading audio from {audio_url}")
+            async with httpx.AsyncClient() as http_client:
+                audio_resp = await http_client.get(audio_url)
+                audio_resp.raise_for_status()
+                audio_bytes = audio_resp.content
+
+            # Call Deepgram API with file buffer
+            logger.info(f"Sending audio buffer to Deepgram...")
+            payload = {
+                "buffer": audio_bytes,
+            }
+            response = await self.client.listen.asyncprerecorded.v("1").transcribe_file(
+                payload,
                 self.options,
             )
             
