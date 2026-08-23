@@ -14,10 +14,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
-import { Plus, RefreshCw, Shield, Users, Link2, Zap, Trash2, Edit, Eye, Download, AlertCircle, CheckCircle, XCircle, Settings, BarChart3, FileText, Stethoscope, Globe } from "lucide-react";
+import { Plus, RefreshCw, Shield, Users, Link2, Zap, Trash2, Edit, Eye, Download, AlertCircle, CheckCircle, XCircle, Settings, BarChart3, FileText, Stethoscope, Globe, Activity } from "lucide-react";
 import { format } from "date-fns";
 import { api } from "@/lib/api";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
 import { z } from "zod";
 
 const inviteUserSchema = z.object({
@@ -35,10 +36,38 @@ const integrationSchema = z.object({
   webhook_secret: z.string().optional(),
 });
 
+const integrationFormSchema = z.object({
+  provider: z.string().min(1, "Provider is required"),
+  display_name: z.string().min(2, "Display name is required"),
+  config_json: z
+    .string()
+    .refine(
+      (v) => {
+        try {
+          const parsed = JSON.parse(v || "{}");
+          return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+        } catch {
+          return false;
+        }
+      },
+      { message: "Must be a valid JSON object" }
+    ),
+  webhook_secret: z.string().optional(),
+});
+
 export default function AdminPage() {
   const [activeTab, setActiveTab] = useState("overview");
   const [loading, setLoading] = useState(true);
-  const [data, setData] = useState({
+  const [data, setData] = useState<{
+    tenant: any;
+    usage: any;
+    users: { users: any[]; total: number };
+    integrations: any[];
+    auditLogs: { logs: any[]; total: number };
+    compliance: any;
+    health: any;
+    metrics: any;
+  }>({
     tenant: null,
     usage: null,
     users: { users: [], total: 0 },
@@ -56,8 +85,14 @@ export default function AdminPage() {
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [integrationDialogOpen, setIntegrationDialogOpen] = useState(false);
   const [editIntegrationId, setEditIntegrationId] = useState<string | null>(null);
-  const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "member", department: "", team: "" });
-  const [integrationForm, setIntegrationForm] = useState({ provider: "", display_name: "", config: {}, webhook_secret: "" });
+  const inviteForm = useForm<z.infer<typeof inviteUserSchema>>({
+    resolver: zodResolver(inviteUserSchema),
+    defaultValues: { email: "", full_name: "", role: "member", department: "", team: "" },
+  });
+  const integrationForm = useForm<z.infer<typeof integrationFormSchema>>({
+    resolver: zodResolver(integrationFormSchema),
+    defaultValues: { provider: "", display_name: "", config_json: "{}", webhook_secret: "" },
+  });
 
   useEffect(() => {
     loadAdminData();
@@ -75,17 +110,17 @@ export default function AdminPage() {
         ]);
         setData(prev => ({
           ...prev,
-          tenant: tenant.status === "fulfilled" ? tenant.value.data : null,
-          usage: usage.status === "fulfilled" ? usage.value.data : null,
-          users: users.status === "fulfilled" ? users.value.data : { users: [], total: 0 },
-          integrations: integrations.status === "fulfilled" ? integrations.value.data : [],
+          tenant: tenant.status === "fulfilled" ? tenant.value : null,
+          usage: usage.status === "fulfilled" ? usage.value : null,
+          users: users.status === "fulfilled" ? users.value : { users: [], total: 0 },
+          integrations: integrations.status === "fulfilled" ? integrations.value : [],
         }));
       } else if (activeTab === "audit") {
         const audit = await api.getAdminAuditLogs({ page, page_size: pageSize, action: search });
-        setData(prev => ({ ...prev, auditLogs: audit.data }));
+        setData(prev => ({ ...prev, auditLogs: audit }));
       } else if (activeTab === "compliance") {
-        const compliance = await api.getAdminComplianceStatus();
-        setData(prev => ({ ...prev, compliance: compliance.data }));
+        const complianceRes = await api.getAdminComplianceStatus();
+        setData(prev => ({ ...prev, compliance: complianceRes }));
       } else if (activeTab === "health") {
         const [health, metrics] = await Promise.allSettled([
           api.getAdminSystemHealth(),
@@ -93,8 +128,8 @@ export default function AdminPage() {
         ]);
         setData(prev => ({
           ...prev,
-          health: health.status === "fulfilled" ? health.value.data : null,
-          metrics: metrics.status === "fulfilled" ? metrics.value.data : null,
+          health: health.status === "fulfilled" ? health.value : null,
+          metrics: metrics.status === "fulfilled" ? metrics.value : null,
         }));
       }
     } catch (error) {
@@ -108,23 +143,35 @@ export default function AdminPage() {
     try {
       await api.inviteUser(values);
       setInviteDialogOpen(false);
-      setInviteForm({ email: "", full_name: "", role: "member", department: "", team: "" });
+      inviteForm.reset({ email: "", full_name: "", role: "member", department: "", team: "" });
       loadAdminData();
     } catch (error) {
       console.error("Failed to invite user:", error);
     }
   };
 
-  const handleIntegrationSubmit = async (values: z.infer<typeof integrationSchema>) => {
+  const handleIntegrationSubmit = async (values: z.infer<typeof integrationFormSchema>) => {
     try {
+      let parsedConfig: Record<string, unknown> = {};
+      try {
+        parsedConfig = JSON.parse(values.config_json || "{}");
+      } catch {
+        parsedConfig = {};
+      }
+      const payload: z.infer<typeof integrationSchema> = {
+        provider: values.provider,
+        display_name: values.display_name,
+        config: parsedConfig,
+        webhook_secret: values.webhook_secret || undefined,
+      };
       if (editIntegrationId) {
-        await api.updateAdminIntegration(editIntegrationId, values);
+        await api.updateAdminIntegration(editIntegrationId, payload);
       } else {
-        await api.createAdminIntegration(values);
+        await api.createAdminIntegration(payload);
       }
       setIntegrationDialogOpen(false);
       setEditIntegrationId(null);
-      setIntegrationForm({ provider: "", display_name: "", config: {}, webhook_secret: "" });
+      integrationForm.reset({ provider: "", display_name: "", config_json: "{}", webhook_secret: "" });
       loadAdminData();
     } catch (error) {
       console.error("Failed to save integration:", error);
@@ -157,7 +204,6 @@ export default function AdminPage() {
 
   const getStatusBadge = (status: string) => {
     const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-      ACTIVE: "default",
       ACTIVE: "default",
       INACTIVE: "secondary",
       DELETED: "destructive",
@@ -401,10 +447,10 @@ export default function AdminPage() {
               <DialogHeader>
                 <DialogTitle>Invite New User</DialogTitle>
               </DialogHeader>
-              <Form onSubmit={handleInviteSubmit}>
-                <div className="grid gap-4 py-4">
+              <Form {...inviteForm}>
+                <form onSubmit={inviteForm.handleSubmit(handleInviteSubmit)} className="grid gap-4 py-4">
                   <FormField
-                    control={inviteForm}
+                    control={inviteForm.control}
                     name="email"
                     render={({ field }) => (
                       <FormItem>
@@ -417,7 +463,7 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={inviteForm}
+                    control={inviteForm.control}
                     name="full_name"
                     render={({ field }) => (
                       <FormItem>
@@ -430,7 +476,7 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={inviteForm}
+                    control={inviteForm.control}
                     name="role"
                     render={({ field }) => (
                       <FormItem>
@@ -452,7 +498,7 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={inviteForm}
+                    control={inviteForm.control}
                     name="department"
                     render={({ field }) => (
                       <FormItem>
@@ -464,7 +510,7 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={inviteForm}
+                    control={inviteForm.control}
                     name="team"
                     render={({ field }) => (
                       <FormItem>
@@ -475,11 +521,11 @@ export default function AdminPage() {
                       </FormItem>
                     )}
                   />
-                </div>
-                <div className="flex justify-end gap-2 border-t pt-4">
-                  <Button type="button" variant="outline" onClick={() => setInviteDialogOpen(false)}>Cancel</Button>
-                  <Button type="submit">Send Invitation</Button>
-                </div>
+                  <div className="flex justify-end gap-2 border-t pt-4">
+                    <Button type="button" variant="outline" onClick={() => setInviteDialogOpen(false)}>Cancel</Button>
+                    <Button type="submit">Send Invitation</Button>
+                  </div>
+                </form>
               </Form>
             </DialogContent>
           </Dialog>
@@ -534,7 +580,7 @@ export default function AdminPage() {
                           <Button variant="ghost" size="icon" onClick={() => handleTestIntegration(integration.id)}>
                             <Stethoscope className="h-4 w-4" />
                           </Button>
-                          <Button variant="ghost" size="icon" onClick={() => { setEditIntegrationId(integration.id); setIntegrationForm(integration); setIntegrationDialogOpen(true); }}>
+                          <Button variant="ghost" size="icon" onClick={() => { setEditIntegrationId(integration.id); integrationForm.reset({ provider: integration.provider, display_name: integration.display_name, config_json: JSON.stringify(integration.config ?? {}, null, 2), webhook_secret: integration.webhook_secret ?? "" }); setIntegrationDialogOpen(true); }}>
                             <Edit className="h-4 w-4" />
                           </Button>
                           <Button variant="ghost" size="icon" onClick={() => handleDeleteIntegration(integration.id)}>
@@ -555,10 +601,10 @@ export default function AdminPage() {
               <DialogHeader>
                 <DialogTitle>{editIntegrationId ? "Edit Integration" : "Add Integration"}</DialogTitle>
               </DialogHeader>
-              <Form onSubmit={handleIntegrationSubmit}>
-                <div className="grid gap-4 py-4">
+              <Form {...integrationForm}>
+                <form onSubmit={integrationForm.handleSubmit(handleIntegrationSubmit)} className="grid gap-4 py-4">
                   <FormField
-                    control={integrationForm}
+                    control={integrationForm.control}
                     name="provider"
                     render={({ field }) => (
                       <FormItem>
@@ -583,7 +629,7 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={integrationForm}
+                    control={integrationForm.control}
                     name="display_name"
                     render={({ field }) => (
                       <FormItem>
@@ -596,16 +642,16 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={integrationForm}
-                    name="config"
+                    control={integrationForm.control}
+                    name="config_json"
                     render={({ field }) => (
                       <FormItem>
                         <FormLabel>Configuration (JSON)</FormLabel>
                         <FormControl>
                           <Textarea
                             placeholder='{"domain": "company.atlassian.net", "email": "user@company.com"}'
-                            value={JSON.stringify(field.value, null, 2)}
-                            onChange={(e) => field.onChange(JSON.parse(e.target.value))}
+                            value={field.value ?? "{}"}
+                            onChange={(e) => field.onChange(e.target.value)}
                             rows={6}
                             className="font-mono text-sm"
                           />
@@ -616,7 +662,7 @@ export default function AdminPage() {
                     )}
                   />
                   <FormField
-                    control={integrationForm}
+                    control={integrationForm.control}
                     name="webhook_secret"
                     render={({ field }) => (
                       <FormItem>
@@ -628,11 +674,11 @@ export default function AdminPage() {
                       </FormItem>
                     )}
                   />
-                </div>
-                <div className="flex justify-end gap-2 border-t pt-4">
-                  <Button type="button" variant="outline" onClick={() => setIntegrationDialogOpen(false)}>Cancel</Button>
-                  <Button type="submit">{editIntegrationId ? "Save Changes" : "Create Integration"}</Button>
-                </div>
+                  <div className="flex justify-end gap-2 border-t pt-4">
+                    <Button type="button" variant="outline" onClick={() => setIntegrationDialogOpen(false)}>Cancel</Button>
+                    <Button type="submit">{editIntegrationId ? "Save Changes" : "Create Integration"}</Button>
+                  </div>
+                </form>
               </Form>
             </DialogContent>
           </Dialog>
@@ -739,7 +785,7 @@ export default function AdminPage() {
                       <div key={key} className={`p-4 rounded-lg border ${value === "healthy" ? "bg-green-50 border-green-200" : value === "unhealthy" ? "bg-red-50 border-red-200" : "bg-yellow-50 border-yellow-200"}`}>
                         <div className="flex items-center justify-between">
                           <h4 className="font-medium capitalize">{key.replace(/_/g, " ")}</h4>
-                          <getHealthBadge value />
+                          {getHealthBadge(String(value))}
                         </div>
                       </div>
                     ))}

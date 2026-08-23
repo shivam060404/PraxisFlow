@@ -1,6 +1,6 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: "standalone",
   reactStrictMode: true,
   experimental: {
     serverActions: {
@@ -8,7 +8,10 @@ const nextConfig: NextConfig = {
     },
   },
   images: {
-    domains: ["img.clerk.com", "images.clerk.dev"],
+    remotePatterns: [
+      { hostname: "img.clerk.com" },
+      { hostname: "images.clerk.dev" },
+    ],
   },
   async rewrites() {
     return [
@@ -20,4 +23,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+module.exports = nextConfig;

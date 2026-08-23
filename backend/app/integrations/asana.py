@@ -5,6 +5,7 @@ Asana Integration Adapter for PraxisFlow.
 import hmac
 import hashlib
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 from app.integrations.base import IntegrationPort, IntegrationConfig, NormalizedWebhookEvent
@@ -95,15 +96,18 @@ class AsanaAdapter(IntegrationPort):
         event = events[0] if events else {}
         resource = event.get("resource", {})
 
-        status_map = {
-            "incomplete": "todo",
-            "complete": "done",
-        }
+        completed = resource.get("completed")
+        if completed is True:
+            status = "done"
+        elif completed is False:
+            status = "todo"
+        else:
+            status = "unknown"
 
         return NormalizedWebhookEvent(
             external_id=resource.get("gid"),
             external_url=f"https://app.asana.com/0/{resource.get('gid')}",
-            status=status_map.get("incomplete", "unknown"),
+            status=status,
             changed_at=datetime.utcnow(),
             raw_payload=payload,
         )

@@ -1,4 +1,4 @@
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from typing import List, Dict, Any, Optional
@@ -16,11 +16,28 @@ class PIIRedactionService:
         self.analyzer = AnalyzerEngine()
         self.anonymizer = AnonymizerEngine()
         
-        # Entities to redact
+        # Lenient SSN recognizer: the built-in one structurally rejects
+        # real-world SSNs via checksum validation, missing most of them.
+        self.analyzer.registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="US_SSN",
+                patterns=[
+                    Pattern(
+                        name="us_ssn_lenient",
+                        regex=r"\b\d{3}-\d{2}-\d{4}\b",
+                        score=0.6,
+                    ),
+                ],
+            )
+        )
+        
+        # Entities to redact.
+        # NOTE: DATE_TIME is intentionally excluded — dates/times carry
+        # task due-date signal and are not personal data worth redacting.
         self.entities = [
             "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", 
             "CREDIT_CARD", "US_SSN", "US_BANK_NUMBER",
-            "US_PASSPORT", "LOCATION", "DATE_TIME",
+            "US_PASSPORT", "LOCATION",
             "IP_ADDRESS", "URL", "CRYPTO", "IBAN_CODE",
         ]
         
@@ -33,7 +50,6 @@ class PIIRedactionService:
             "US_SSN": OperatorConfig("replace", {"new_value": "[SSN]"}),
             "CREDIT_CARD": OperatorConfig("replace", {"new_value": "[CREDIT_CARD]"}),
             "LOCATION": OperatorConfig("replace", {"new_value": "[LOCATION]"}),
-            "DATE_TIME": OperatorConfig("replace", {"new_value": "[DATE]"}),
         }
     
     def redact_text(self, text: str) -> Dict[str, Any]:

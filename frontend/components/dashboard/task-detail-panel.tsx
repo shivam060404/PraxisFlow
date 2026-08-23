@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import type { TaskAuditLog } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,7 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUIStore } from "@/lib/store";
 
 const typeIcons = {
@@ -484,7 +485,7 @@ function AuditLogTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="space-y-3 max-h-64 overflow-y-auto">
-      {data.items.map((log) => (
+      {data.items.map((log: TaskAuditLog) => (
         <div key={log.id} className="flex items-start gap-3 p-3 bg-muted/30 rounded-lg">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10">
             {log.new_status === "COMPLETED" && <CheckCircle className="h-4 w-4 text-primary" />}

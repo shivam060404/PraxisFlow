@@ -231,9 +231,19 @@ class TestTokenLimitGuard:
         guardrail_context.model_config = {"max_tokens": 100}
         guardrail_context.pipeline_node = "extraction"
         
-        # Very long text
-        text = "x" * 10000  # ~2500 tokens
+        # ~10k estimated tokens, well over the extraction input limit (8000)
+        text = "x" * 40000
         result = await guard.check(text, guardrail_context)
+        
+        assert result.action == GuardrailAction.BLOCK
+
+    @pytest.mark.asyncio
+    async def test_blocks_excessive_output_tokens(self, guardrail_context):
+        guard = TokenLimitGuard(enabled=True)
+        guardrail_context.model_config = {"max_tokens": 999999}
+        guardrail_context.pipeline_node = "extraction"
+        
+        result = await guard.check("Short prompt", guardrail_context)
         
         assert result.action == GuardrailAction.BLOCK
 
@@ -467,6 +477,9 @@ class TestGuardrailsPipeline:
             schema_name="extraction",
             enabled=True,
         )
+        
+        # Grounding context that supports the extracted task
+        guardrail_context.transcript_context = "This is a test task quote from the meeting."
         
         output = '{"tasks": [{"title": "Test task", "confidence": 0.95, "source_quote": "test"}], "meeting_summary": "Test", "key_topics": []}'
         

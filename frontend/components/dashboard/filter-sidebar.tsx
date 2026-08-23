@@ -4,6 +4,7 @@ import * as React from "react";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -12,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { cn, getStatusColor } from "@/lib/utils";
 import { Filter, X, ChevronDown, SlidersHorizontal } from "lucide-react";
 import { useUIStore } from "@/lib/store";
-import { api, type TaskStatus, type Priority } from "@/lib/api";
+import { api, type TaskStatus, type Priority, type User, type Meeting } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
 
 const STATUSES: { value: TaskStatus; label: string }[] = [
@@ -184,7 +185,7 @@ export function FilterSidebar() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="">All assignees</SelectItem>
-                {users?.items.map((user) => (
+                {users?.items.map((user: User) => (
                   <SelectItem key={user.id} value={user.id}>
                     {user.full_name} ({user.email})
                   </SelectItem>
@@ -207,7 +208,7 @@ export function FilterSidebar() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="">All meetings</SelectItem>
-                {meetings?.items.map((meeting) => (
+                {meetings?.items.map((meeting: Meeting) => (
                   <SelectItem key={meeting.id} value={meeting.id}>
                     {meeting.title}
                   </SelectItem>

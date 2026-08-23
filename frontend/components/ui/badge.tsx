@@ -6,7 +6,12 @@ export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement> {
   status?: "extracted" | "pending" | "verified" | "assigned" | "synced" | "completed" | "dismissed";
 }
 
-const badgeVariants = {
+type BadgeVariant = NonNullable<BadgeProps["variant"]>;
+
+const baseVariants: Record<
+  Exclude<BadgeVariant, "status">,
+  string
+> & { status: Record<NonNullable<BadgeProps["status"]>, string> } = {
   default: "border-transparent bg-primary text-primary-foreground hover:bg-primary/80",
   secondary: "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
   destructive: "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
@@ -18,7 +23,7 @@ const badgeVariants = {
     assigned: "bg-status-assigned/10 text-status-assigned border-status-assigned/20",
     synced: "bg-status-synced/10 text-status-synced border-status-synced/20",
     completed: "bg-status-completed/10 text-status-completed border-status-completed/20",
-    dismissed: "bg-status-dismissed/10 text-status-dismissed-dismissed-muted border-status-dismissed/20",
+    dismissed: "bg-status-dismissed/10 text-muted-foreground border-status-dismissed/20",
   },
 };
 
@@ -27,9 +32,9 @@ function Badge({ className, variant = "default", status, ...props }: BadgeProps)
 
   let variantStyles = "";
   if (variant === "status" && status) {
-    variantStyles = badgeVariants.status[status];
-  } else {
-    variantStyles = badgeVariants[variant] || badgeVariants.default;
+    variantStyles = baseVariants.status[status];
+  } else if (variant !== "status") {
+    variantStyles = baseVariants[variant] || baseVariants.default;
   }
 
   return (

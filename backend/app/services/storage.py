@@ -28,8 +28,8 @@ class StorageService:
                 if not self.client.bucket_exists(bucket):
                     self.client.make_bucket(bucket)
                     logger.info(f"Created bucket: {bucket}")
-            except S3Error as e:
-                logger.error(f"Error creating bucket {bucket}: {e}")
+            except Exception as e:
+                logger.warning(f"Could not ensure bucket {bucket} (MinIO may be unavailable): {e}")
     
     async def upload_file(
         self,
@@ -117,5 +117,20 @@ class StorageService:
             return []
 
 
-# Global instance
-storage_service = StorageService()
+class _LazyStorageService:
+    """Lazy proxy so importing this module never dials MinIO at import time."""
+
+    def __init__(self):
+        self._instance: Optional[StorageService] = None
+
+    def _get(self) -> StorageService:
+        if self._instance is None:
+            self._instance = StorageService()
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
+# Global lazy instance — constructed on first use, not on import
+storage_service = _LazyStorageService()

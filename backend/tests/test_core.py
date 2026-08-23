@@ -206,6 +206,7 @@ class TestChunking:
         state = ExtractionState(
             meeting_id="test_meeting",
             tenant_id="test_tenant",
+            user_id="test_user",
             meeting_context="Test meeting",
             transcript_chunks=[
                 TranscriptChunk(

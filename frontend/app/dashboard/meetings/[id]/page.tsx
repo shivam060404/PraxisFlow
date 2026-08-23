@@ -11,6 +11,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Loader2, User, Clock, MessageSquare, Play, Pause, Volume2, Search, ChevronLeft, ChevronRight, Flag, CheckCircle, AlertTriangle, ArrowRightCircle, Gavel, Copy } from "lucide-react";
@@ -127,12 +129,11 @@ function TranscriptPlayer({ transcript, tasks, meetingId }: { transcript: Transc
             placeholder="Search transcript..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-64"
-            size="sm"
+            className="w-64 h-8 text-sm"
           />
-          <Select value={speakerFilter} onValueChange={setSpeakerFilter} className="w-40">
-            <SelectTrigger size="sm">
-              <SelectValue placeholder="All speakers" />
+          <Select value={speakerFilter} onValueChange={setSpeakerFilter}>
+            <SelectTrigger className="w-40 h-8 text-sm">
+              <SelectValue placeholder="All Speakers" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Speakers</SelectItem>

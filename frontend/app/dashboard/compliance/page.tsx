@@ -13,7 +13,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Download, RefreshCw, AlertCircle, CheckCircle, XCircle, Clock, FileText, Shield, Users, Database, Activity } from "lucide-react";
 import { format } from "date-fns";
-import { api } from "@/lib/api";
+import { api, type DataSubjectRequestType } from "@/lib/api";
 
 const getStatusBadge = (status: string) => {
   const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
@@ -38,15 +38,26 @@ export default function CompliancePage() {
     dsrRequests?: any[];
   }>({});
 
-  const [dsrForm, setDsrForm] = useState({
+  const [dsrForm, setDsrForm] = useState<{
+    request_type: DataSubjectRequestType;
+    data_subject_email: string;
+    reason: string;
+    specific_data_categories: string[];
+  }>({
     request_type: "access",
     data_subject_email: "",
     reason: "",
-    specific_data_categories: "",
+    specific_data_categories: [],
   });
   const [dsrLoading, setDsrLoading] = useState(false);
 
-  const [exportForm, setExportForm] = useState({
+  const [exportForm, setExportForm] = useState<{
+    format: "json" | "csv" | "pdf";
+    include_audit_logs: boolean;
+    include_ai_decisions: boolean;
+    date_from: string;
+    date_to: string;
+  }>({
     format: "json",
     include_audit_logs: true,
     include_ai_decisions: true,
@@ -67,17 +78,17 @@ export default function CompliancePage() {
         api.getGDPRStatus(),
         api.getModelCards(),
         api.getAIAuditLogs({ limit: 50 }),
-        Promise.resolve({ data: [] }),
+        Promise.resolve([]),
         api.getDataSubjectRequests(),
       ]);
 
       setData({
-        euAiAct: euAiAct.status === "fulfilled" ? euAiAct.value.data : null,
-        gdpr: gdpr.status === "fulfilled" ? gdpr.value.data : null,
-        modelCards: modelCards.status === "fulfilled" ? modelCards.value.data : null,
-        auditLogs: auditLogs.status === "fulfilled" ? auditLogs.value.data : [],
-        exports: exports.status === "fulfilled" ? exports.value.data : [],
-        dsrRequests: dsrRequests.status === "fulfilled" ? dsrRequests.value.data : [],
+        euAiAct: euAiAct.status === "fulfilled" ? euAiAct.value : null,
+        gdpr: gdpr.status === "fulfilled" ? gdpr.value : null,
+        modelCards: modelCards.status === "fulfilled" ? modelCards.value : null,
+        auditLogs: auditLogs.status === "fulfilled" ? auditLogs.value : [],
+        exports: exports.status === "fulfilled" ? exports.value : [],
+        dsrRequests: dsrRequests.status === "fulfilled" ? dsrRequests.value : [],
       });
     } catch (error) {
       console.error("Failed to load compliance data:", error);
@@ -92,7 +103,7 @@ export default function CompliancePage() {
     try {
       await api.createDataSubjectRequest(dsrForm);
       await loadComplianceData();
-      setDsrForm({ request_type: "access", data_subject_email: "", reason: "", specific_data_categories: "" });
+      setDsrForm({ request_type: "access", data_subject_email: "", reason: "", specific_data_categories: [] });
     } catch (error) {
       console.error("Failed to create DSR:", error);
     } finally {
@@ -206,7 +217,7 @@ export default function CompliancePage() {
                 <form onSubmit={handleDsrSubmit} className="space-y-4 mb-6 p-4 bg-muted/50 rounded-lg">
                   <h4 className="font-medium">Create New DSR</h4>
                   <div className="grid gap-2 md:grid-cols-2">
-                    <Select value={dsrForm.request_type} onValueChange={(v) => setDsrForm({ ...dsrForm, request_type: v })}>
+                    <Select value={dsrForm.request_type} onValueChange={(v) => setDsrForm({ ...dsrForm, request_type: v as DataSubjectRequestType })}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="access">Access (Art. 15)</SelectItem>
@@ -463,7 +474,7 @@ export default function CompliancePage() {
                 <form onSubmit={handleExportSubmit} className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium mb-1">Format</label>
-                    <Select value={exportForm.format} onValueChange={(v) => setExportForm({ ...exportForm, format: v })}>
+                    <Select value={exportForm.format} onValueChange={(v) => setExportForm({ ...exportForm, format: v as "json" | "csv" | "pdf" })}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="json">JSON (structured)</SelectItem>

@@ -5,6 +5,7 @@ Linear Integration Adapter for PraxisFlow.
 import hmac
 import hashlib
 import logging
+from datetime import datetime
 from typing import Dict, Any
 
 from app.integrations.base import IntegrationPort, IntegrationConfig, NormalizedWebhookEvent
@@ -137,8 +138,12 @@ class LinearAdapter(IntegrationPort):
         return NormalizedWebhookEvent(
             external_id=data.get("identifier"),
             external_url=data.get("url"),
-            status=status_map.get(data.get("state", {}).get("name", ""), "unknown"),
-            changed_at=datetime.fromisoformat(payload.get("createdAt", "").replace("Z", "+00:00")),
+            status=status_map.get(data.get("state", {}).get("name", "").lower(), "unknown"),
+            changed_at=(
+                datetime.fromisoformat(payload["createdAt"].replace("Z", "+00:00"))
+                if payload.get("createdAt")
+                else datetime.utcnow()
+            ),
             raw_payload=payload,
         )
 

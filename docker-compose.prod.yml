@@ -408,7 +408,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: praxisflow-worker
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1 -Q asr,extraction,integrations,celery
     environment:
       ENVIRONMENT: production
       LOG_LEVEL: INFO

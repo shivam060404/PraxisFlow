@@ -3,6 +3,7 @@ Jira Integration Adapter for PraxisFlow.
 """
 
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 import httpx

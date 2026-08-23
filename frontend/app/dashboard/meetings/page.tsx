@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn, formatRelativeTime } from "@/lib/utils";
-import { api, type Meeting } from "@/lib/api";
+import { api, type Meeting , type PaginatedResponse } from "@/lib/api";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -48,7 +48,7 @@ export default function MeetingsPage() {
 
   const queryClient = useQueryClient();
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading } = useQuery<PaginatedResponse<Meeting>>({
     queryKey: ["meetings", { search, status: statusFilter }],
     queryFn: () => api.getMeetings({ 
       page_size: 50,
@@ -297,7 +297,7 @@ export default function MeetingsPage() {
                               </DropdownMenuItem>
                               {meeting.transcript && (
                                 <DropdownMenuItem onClick={(e) => { e.stopPropagation(); 
-                                  const blob = new Blob([meeting.transcript?.fullText || ""], { type: "text/plain" });
+                                  const blob = new Blob([meeting.transcript?.full_text || ""], { type: "text/plain" });
                                   const url = URL.createObjectURL(blob);
                                   const a = document.createElement("a");
                                   a.href = url;

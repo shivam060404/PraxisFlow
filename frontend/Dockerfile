@@ -53,8 +53,8 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-# Health check
+# Health check (wget ships with alpine; curl does not)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:3000/api/health || exit 1
+    CMD wget -qO- http://localhost:3000/ >/dev/null || exit 1
 
 CMD ["node", "server.js"]

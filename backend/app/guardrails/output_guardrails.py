@@ -212,11 +212,18 @@ class HallucinationDetector(BaseGuardrail):
         self,
         enabled: bool = True,
         faithfulness_threshold: float = 0.7,
-        hallucination_threshold: float = 0.1,
+        hallucination_threshold: float = None,
     ):
         super().__init__("hallucination_detector", GuardrailLayer.OUTPUT, enabled)
         self.faithfulness_threshold = faithfulness_threshold
-        self.hallucination_threshold = hallucination_threshold
+        # Keep both thresholds on the same scale by default, otherwise a
+        # faithfulness score that passes the 0.7 bar can still trip the
+        # hallucination check (1 - 0.7 = 0.3).
+        self.hallucination_threshold = (
+            hallucination_threshold
+            if hallucination_threshold is not None
+            else round(1.0 - faithfulness_threshold, 4)
+        )
 
     async def check(self, content: str, context: GuardrailContext) -> GuardrailResult:
         if not self.enabled:
@@ -430,6 +437,11 @@ class ContradictionDetector(BaseGuardrail):
                         "prior_task": prior.get("title"),
                         "type": "direct_contradiction",
                     })
+                    continue
+
+                # Check for conflicting attributes on the same task
+                attr_conflicts = self._attribute_conflicts(new_task, prior)
+                contradictions.extend(attr_conflicts)
 
         if contradictions:
             logger.warning(f"Contradictions detected for tenant {context.tenant_id}: {len(contradictions)}")
@@ -468,6 +480,38 @@ class ContradictionDetector(BaseGuardrail):
                 return True
 
         return False
+
+    def _attribute_conflicts(self, new_task: dict, prior_task: dict) -> List[dict]:
+        """Detect conflicting attribute values (e.g., deadline) for the same task."""
+        conflicts = []
+
+        new_title = (new_task.get("title") or "").strip().lower()
+        prior_title = (prior_task.get("title") or "").strip().lower()
+        if not new_title or not prior_title:
+            return conflicts
+
+        # Only compare when both extractions refer to the same task
+        same_task = (
+            new_title == prior_title
+            or new_title in prior_title
+            or prior_title in new_title
+        )
+        if not same_task:
+            return conflicts
+
+        for field in ("deadline_hint", "assignee_hint"):
+            new_val = str(new_task.get(field) or "").strip().lower()
+            prior_val = str(prior_task.get(field) or "").strip().lower()
+            if new_val and prior_val and new_val != prior_val:
+                conflicts.append({
+                    "new_task": new_task.get("title"),
+                    "prior_task": prior_task.get("title"),
+                    "type": f"{field}_conflict",
+                    "new_value": new_val,
+                    "prior_value": prior_val,
+                })
+
+        return conflicts
 
 
 # ─── Content Policy Guard ───

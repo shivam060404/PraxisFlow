@@ -1,10 +1,23 @@
-import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from "axios";
-import { getToken } from "@clerk/nextjs";
+import axios, { AxiosInstance, AxiosError, AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/**
+ * The response interceptor unwraps payloads (`response.data`), so callers
+ * receive plain data instead of AxiosResponse envelopes. This type reflects
+ * that runtime contract.
+ */
+interface UnwrappedClient {
+  get: (url: string, config?: AxiosRequestConfig) => Promise<any>;
+  post: (url: string, data?: unknown, config?: AxiosRequestConfig) => Promise<any>;
+  patch: (url: string, data?: unknown, config?: AxiosRequestConfig) => Promise<any>;
+  put: (url: string, data?: unknown, config?: AxiosRequestConfig) => Promise<any>;
+  delete: (url: string, config?: AxiosRequestConfig) => Promise<any>;
+}
+
 class ApiClient {
   private client: AxiosInstance;
+  private http: UnwrappedClient;
 
   constructor() {
     this.client = axios.create({
@@ -18,7 +31,17 @@ class ApiClient {
     this.client.interceptors.request.use(
       async (config: InternalAxiosRequestConfig) => {
         try {
-          const token = await getToken();
+          // Resolve a bearer token when an auth provider is available.
+          // Uses Clerk's singleton if configured; falls back to a local
+          // dev token so the dashboard works against the dev backend.
+          const w = window as unknown as {
+            Clerk?: { session?: { getToken?: () => Promise<string | null> } };
+          };
+          let token: string | null | undefined =
+            await w.Clerk?.session?.getToken?.();
+          if (!token && typeof localStorage !== "undefined") {
+            token = localStorage.getItem("auth_token");
+          }
           if (token) {
             config.headers.Authorization = `Bearer ${token}`;
           }
@@ -31,7 +54,10 @@ class ApiClient {
     );
 
     this.client.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        // Unwrap payloads so callers work with data directly
+        return response.data as unknown as typeof response;
+      },
       (error: AxiosError) => {
         if (error.response?.status === 401) {
           if (typeof window !== "undefined") {
@@ -41,19 +67,21 @@ class ApiClient {
         return Promise.reject(error);
       }
     );
+
+    this.http = this.client as unknown as UnwrappedClient;
   }
 
   // ─── Health ───
   async healthCheck() {
-    return this.client.get("/health");
+    return this.http.get("/health");
   }
 
   async readinessCheck() {
-    return this.client.get("/ready");
+    return this.http.get("/ready");
   }
 
   async livenessCheck() {
-    return this.client.get("/live");
+    return this.http.get("/live");
   }
 
   // ─── Meetings ───
@@ -62,128 +90,143 @@ class ApiClient {
     page_size?: number;
     status?: string;
   }) {
-    return this.client.get("/meetings", { params });
+    return this.http.get("/meetings", { params });
   }
 
   async getMeeting(id: string) {
-    return this.client.get(`/meetings/${id}`);
+    return this.http.get(`/meetings/${id}`);
   }
 
   async createMeeting(data: FormData) {
-    return this.client.post("/meetings/upload", data, {
+    return this.http.post("/meetings/upload", data, {
       headers: { "Content-Type": "multipart/form-data" },
     });
   }
 
   async updateMeeting(id: string, data: Partial<Meeting>) {
-    return this.client.patch(`/meetings/${id}`, data);
+    return this.http.patch(`/meetings/${id}`, data);
   }
 
   async deleteMeeting(id: string) {
-    return this.client.delete(`/meetings/${id}`);
+    return this.http.delete(`/meetings/${id}`);
   }
 
   async reprocessMeeting(id: string) {
-    return this.client.post(`/meetings/${id}/process`);
+    return this.http.post(`/meetings/${id}/process`);
   }
 
   async getMeetingStatus(id: string) {
-    return this.client.get(`/meetings/${id}/status`);
+    return this.http.get(`/meetings/${id}/status`);
   }
 
   // ─── Tasks ───
   async getTasks(params?: {
     page?: number;
     page_size?: number;
-    meeting_id?: string;
-    assignee_id?: string;
-    status?: string;
-    task_type?: string;
-    priority?: string;
+    meeting_id?: string | string[];
+    assignee_id?: string | string[];
+    status?: string | string[];
+    task_type?: string | string[];
+    priority?: string | string[];
     search?: string;
+    date_from?: string;
+    date_to?: string;
   }) {
-    return this.client.get("/tasks", { params });
+    return this.http.get("/tasks", { params });
   }
 
   async getTask(id: string) {
-    return this.client.get(`/tasks/${id}`);
+    return this.http.get(`/tasks/${id}`);
   }
 
   async updateTask(id: string, data: Partial<Task>) {
-    return this.client.patch(`/tasks/${id}`, data);
+    return this.http.patch(`/tasks/${id}`, data);
   }
 
   async verifyTask(id: string, verification_status: string, reasoning?: string) {
-    return this.client.post(`/tasks/${id}/verify`, {
+    return this.http.post(`/tasks/${id}/verify`, {
       verification_status,
       reasoning,
     });
   }
 
   async assignTask(id: string, assignee_id: string) {
-    return this.client.post(`/tasks/${id}/assign`, { assignee_id });
+    return this.http.post(`/tasks/${id}/assign`, { assignee_id });
   }
 
   async dismissTask(id: string, reason?: string) {
-    return this.client.post(`/tasks/${id}/dismiss`, { reason });
+    return this.http.post(`/tasks/${id}/dismiss`, { reason });
   }
 
   async bulkUpdateTasks(task_ids: string[], data: Partial<Task>) {
-    return this.client.post("/tasks/bulk-update", { task_ids, ...data });
+    return this.http.post("/tasks/bulk-update", { task_ids, ...data });
   }
 
   async getTaskAuditLog(id: string) {
-    return this.client.get(`/tasks/${id}/audit-log`);
+    return this.http.get(`/tasks/${id}/audit-log`);
   }
 
   async getTaskSourceQuote(id: string, word_start: number, word_end: number) {
-    return this.client.get(`/tasks/${id}/source-quote`, {
+    return this.http.get(`/tasks/${id}/source-quote`, {
       params: { word_start, word_end },
     });
   }
 
   async syncTaskToIntegration(id: string, integration_id: string) {
-    return this.client.post(`/tasks/${id}/sync`, { integration_id });
+    return this.http.post(`/tasks/${id}/sync`, { integration_id });
   }
 
   // ─── Users ───
-  async getUsers() {
-    return this.client.get("/users");
+  async getUsers(params?: { search?: string; role?: string; status?: string; page?: number; page_size?: number }) {
+    return this.http.get("/users", { params });
+  }
+
+  async getCurrentUserProfile() {
+    return this.http.get("/users/me/profile");
+  }
+
+  async createUser(data: {
+    tenant_id: string;
+    email: string;
+    full_name: string;
+    role?: string;
+  }) {
+    return this.http.post("/users", data);
   }
 
   async getUser(id: string) {
-    return this.client.get(`/users/${id}`);
+    return this.http.get(`/users/${id}`);
   }
 
   async updateUser(id: string, data: Partial<User>) {
-    return this.client.patch(`/users/${id}`, data);
+    return this.http.patch(`/users/${id}`, data);
   }
 
   // ─── Metrics & Analytics ───
   async getMetrics() {
-    return this.client.get("/metrics");
+    return this.http.get("/metrics");
   }
 
   async getDashboardMetrics() {
-    return this.client.get("/metrics/dashboard");
+    return this.http.get("/metrics/dashboard");
   }
 
   async getTeamMetrics() {
-    return this.client.get("/metrics/team");
+    return this.http.get("/metrics/team");
   }
 
   async getExtractionAccuracy(params?: {
     start_date?: string;
     end_date?: string;
   }) {
-    return this.client.get("/metrics/extraction-accuracy", { params });
+    return this.http.get("/metrics/extraction-accuracy", { params });
   }
 
   async getPipelinePerformance(params?: {
     start_date?: string;
     end_date?: string;
   }) {
-    return this.client.get("/metrics/pipeline-performance", { params });
+    return this.http.get("/metrics/pipeline-performance", { params });
   }
 
   async getCostAnalytics(params?: {
@@ -191,16 +234,16 @@ class ApiClient {
     end_date?: string;
     group_by?: "model" | "pipeline_node" | "tenant";
   }) {
-    return this.client.get("/metrics/cost", { params });
+    return this.http.get("/metrics/cost", { params });
   }
 
   // ─── Transcripts ───
   async getTranscript(meetingId: string) {
-    return this.client.get(`/transcripts/meeting/${meetingId}`);
+    return this.http.get(`/transcripts/meeting/${meetingId}`);
   }
 
   async getTranscriptById(id: string) {
-    return this.client.get(`/transcripts/${id}`);
+    return this.http.get(`/transcripts/${id}`);
   }
 
   async getUtterances(transcriptId: string, params?: {
@@ -208,89 +251,92 @@ class ApiClient {
     end_time_ms?: number;
     speaker_label?: string;
   }) {
-    return this.client.get(`/transcripts/${transcriptId}/utterances`, { params });
+    return this.http.get(`/transcripts/${transcriptId}/utterances`, { params });
   }
 
   async getTranscriptChunks(transcriptId: string, params?: {
     chunk_size?: number;
     overlap?: number;
   }) {
-    return this.client.get(`/transcripts/${transcriptId}/chunks`, { params });
+    return this.http.get(`/transcripts/${transcriptId}/chunks`, { params });
   }
 
   async getTranscriptSpan(transcriptId: string, word_start: number, word_end: number) {
-    return this.client.get(`/transcripts/${transcriptId}/span`, {
+    return this.http.get(`/transcripts/${transcriptId}/span`, {
       params: { word_start, word_end },
     });
   }
 
   async getTranscriptSpanByMeeting(meetingId: string, word_start: number, word_end: number) {
-    return this.client.get(`/transcripts/meeting/${meetingId}/span`, {
+    return this.http.get(`/transcripts/meeting/${meetingId}/span`, {
       params: { word_start, word_end },
     });
   }
 
   async searchTranscript(transcriptId: string, query: string, limit?: number) {
-    return this.client.get(`/transcripts/${transcriptId}/search`, {
+    return this.http.get(`/transcripts/${transcriptId}/search`, {
       params: { q: query, limit },
     });
   }
 
   async getTranscriptStats(transcriptId: string) {
-    return this.client.get(`/transcripts/${transcriptId}/stats`);
+    return this.http.get(`/transcripts/${transcriptId}/stats`);
   }
 
   // ─── Integrations ───
   async getIntegrations() {
-    return this.client.get("/integrations");
+    return this.http.get("/integrations");
   }
 
   async getIntegration(id: string) {
-    return this.client.get(`/integrations/${id}`);
+    return this.http.get(`/integrations/${id}`);
   }
 
   async createIntegration(data: IntegrationCreate) {
-    return this.client.post("/integrations", data);
+    return this.http.post("/integrations", data);
   }
 
   async updateIntegration(id: string, data: Partial<IntegrationCreate>) {
-    return this.client.patch(`/integrations/${id}`, data);
+    return this.http.patch(`/integrations/${id}`, data);
   }
 
   async deleteIntegration(id: string) {
-    return this.client.delete(`/integrations/${id}`);
+    return this.http.delete(`/integrations/${id}`);
   }
 
   async testIntegration(id: string) {
-    return this.client.post(`/integrations/${id}/test`);
+    return this.http.post(`/integrations/${id}/test`);
   }
 
   async triggerIntegrationSync(id: string) {
-    return this.client.post(`/integrations/${id}/sync`);
+    return this.http.post(`/integrations/${id}/sync`);
   }
 
   async getIntegrationHealth(id: string) {
-    return this.client.get(`/integrations/${id}/health`);
+    return this.http.get(`/integrations/${id}/health`);
   }
 
   // ─── WebSocket ───
   createWebSocket(tenantId: string): WebSocket {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
-    const token = typeof window !== "undefined" ? localStorage.getItem("clerk_token") : "";
-    return new WebSocket(`${wsUrl}/api/v1/ws?token=${token}&tenant_id=${tenantId}`);
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("auth_token") ?? ""
+        : "";
+    return new WebSocket(`${wsUrl}/api/v1/ws?token=${encodeURIComponent(token)}&tenant_id=${tenantId}`);
   }
 
   // ─── Admin (Tenant Management) ───
   async getTenant() {
-    return this.client.get("/admin/tenant");
+    return this.http.get("/admin/tenant");
   }
 
   async updateTenant(data: TenantSettingsUpdate) {
-    return this.client.patch("/admin/tenant", data);
+    return this.http.patch("/admin/tenant", data);
   }
 
   async getTenantUsage() {
-    return this.client.get("/admin/tenant/usage");
+    return this.http.get("/admin/tenant/usage");
   }
 
   async getTenantUsers(params?: {
@@ -300,43 +346,43 @@ class ApiClient {
     status?: string;
     search?: string;
   }) {
-    return this.client.get("/admin/users", { params });
+    return this.http.get("/admin/users", { params });
   }
 
   async inviteUser(data: UserInvite) {
-    return this.client.post("/admin/users/invite", data);
+    return this.http.post("/admin/users/invite", data);
   }
 
-  async updateUser(id: string, data: Partial<User>) {
-    return this.client.patch(`/admin/users/${id}`, data);
+  async updateAdminUser(id: string, data: Partial<User>) {
+    return this.http.patch(`/admin/users/${id}`, data);
   }
 
   async bulkUserAction(data: BulkUserAction) {
-    return this.client.post("/admin/users/bulk", data);
+    return this.http.post("/admin/users/bulk", data);
   }
 
   async getAdminIntegrations() {
-    return this.client.get("/admin/integrations");
+    return this.http.get("/admin/integrations");
   }
 
   async createAdminIntegration(data: AdminIntegrationCreate) {
-    return this.client.post("/admin/integrations", data);
+    return this.http.post("/admin/integrations", data);
   }
 
   async updateAdminIntegration(id: string, data: AdminIntegrationUpdate) {
-    return this.client.patch(`/admin/integrations/${id}`, data);
+    return this.http.patch(`/admin/integrations/${id}`, data);
   }
 
   async deleteAdminIntegration(id: string) {
-    return this.client.delete(`/admin/integrations/${id}`);
+    return this.http.delete(`/admin/integrations/${id}`);
   }
 
   async testAdminIntegration(id: string) {
-    return this.client.post(`/admin/integrations/${id}/test`);
+    return this.http.post(`/admin/integrations/${id}/test`);
   }
 
   async triggerAdminSync(id: string) {
-    return this.client.post(`/admin/integrations/${id}/sync`);
+    return this.http.post(`/admin/integrations/${id}/sync`);
   }
 
   async getAdminAuditLogs(params?: {
@@ -347,24 +393,24 @@ class ApiClient {
     action?: string;
     user_id?: string;
   }) {
-    return this.client.get("/admin/audit-logs", { params });
+    return this.http.get("/admin/audit-logs", { params });
   }
 
   async getAdminComplianceStatus() {
-    return this.client.get("/admin/compliance/status");
+    return this.http.get("/admin/compliance/status");
   }
 
   async getAdminSystemHealth() {
-    return this.client.get("/admin/system/health");
+    return this.http.get("/admin/system/health");
   }
 
   async getAdminSystemMetrics() {
-    return this.client.get("/admin/system/metrics");
+    return this.http.get("/admin/system/metrics");
   }
 
   // ─── Compliance ───
   async createDataSubjectRequest(data: DataSubjectRequestCreate) {
-    return this.client.post("/compliance/data-subject-requests", data);
+    return this.http.post("/compliance/data-subject-requests", data);
   }
 
   async getDataSubjectRequests(params?: {
@@ -372,27 +418,27 @@ class ApiClient {
     limit?: number;
     offset?: number;
   }) {
-    return this.client.get("/compliance/data-subject-requests", { params });
+    return this.http.get("/compliance/data-subject-requests", { params });
   }
 
   async getDataSubjectRequest(id: string) {
-    return this.client.get(`/compliance/data-subject-requests/${id}`);
+    return this.http.get(`/compliance/data-subject-requests/${id}`);
   }
 
   async processDataSubjectRequest(id: string) {
-    return this.client.post(`/compliance/data-subject-requests/${id}/process`);
+    return this.http.post(`/compliance/data-subject-requests/${id}/process`);
   }
 
   async exportTenantData(data: ComplianceExportRequest) {
-    return this.client.post("/compliance/export", data);
+    return this.http.post("/compliance/export", data);
   }
 
   async getExportStatus(exportId: string) {
-    return this.client.get(`/compliance/exports/${exportId}`);
+    return this.http.get(`/compliance/exports/${exportId}`);
   }
 
   async eraseTenantData(confirmation: string) {
-    return this.client.post("/compliance/erase-tenant", { confirmation });
+    return this.http.post("/compliance/erase-tenant", { confirmation });
   }
 
   async getAIAuditLogs(params?: {
@@ -404,43 +450,50 @@ class ApiClient {
     limit?: number;
     offset?: number;
   }) {
-    return this.client.get("/compliance/ai-audit-logs", { params });
+    return this.http.get("/compliance/ai-audit-logs", { params });
   }
 
   async getEUAIActStatus() {
-    return this.client.get("/compliance/eu-ai-act");
+    return this.http.get("/compliance/eu-ai-act");
   }
 
   async getGDPRStatus() {
-    return this.client.get("/compliance/gdpr");
+    return this.http.get("/compliance/gdpr");
   }
 
   async getModelCards() {
-    return this.client.get("/compliance/model-cards");
+    return this.http.get("/compliance/model-cards");
   }
 
   // ─── Webhooks ───
   async registerWebhook(data: WebhookRegistration) {
-    return this.client.post("/webhooks/register", data);
+    return this.http.post("/webhooks/register", data);
   }
 
   async unregisterWebhook(provider: string) {
-    return this.client.delete(`/webhooks/${provider}`);
+    return this.http.delete(`/webhooks/${provider}`);
   }
 
   async testWebhook(provider: string) {
-    return this.client.get(`/webhooks/${provider}/test`);
+    return this.http.get(`/webhooks/${provider}/test`);
   }
 
   async getWebhookLogs(provider: string, params?: {
     page?: number;
     page_size?: number;
   }) {
-    return this.client.get(`/webhooks/${provider}/logs`, { params });
+    return this.http.get(`/webhooks/${provider}/logs`, { params });
   }
 }
 
 // ─── Types ───
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page?: number;
+  page_size?: number;
+}
+
 export interface Meeting {
   id: string;
   tenant_id: string;
@@ -514,6 +567,19 @@ export interface Utterance {
   redaction_map?: Record<string, unknown>;
 }
 
+export type TaskStatus =
+  | "EXTRACTED"
+  | "PENDING_REVIEW"
+  | "VERIFIED"
+  | "ASSIGNED"
+  | "SYNCED"
+  | "SYNC_FAILED"
+  | "CONFLICT"
+  | "COMPLETED"
+  | "DISMISSED";
+
+export type Priority = "HIGH" | "MEDIUM" | "LOW";
+
 export interface Task {
   id: string;
   tenant_id: string;
@@ -566,7 +632,7 @@ export interface Integration {
   provider: string;
   display_name: string;
   status: string;
-  config: Record<string, unknown>;
+  config: Record<string, any>;
   webhook_secret?: string;
   created_at: string;
   updated_at: string;
@@ -575,7 +641,7 @@ export interface Integration {
 export interface IntegrationCreate {
   provider: string;
   display_name: string;
-  config: Record<string, unknown>;
+  config: Record<string, any>;
   webhook_secret?: string;
 }
 
@@ -604,12 +670,12 @@ export interface BulkUserAction {
 export interface AdminIntegrationCreate {
   provider: string;
   display_name: string;
-  config: Record<string, unknown>;
+  config: Record<string, any>;
   webhook_secret?: string;
 }
 
 export interface AdminIntegrationUpdate {
-  config: Record<string, unknown>;
+  config: Record<string, any>;
   webhook_secret?: string;
 }
 

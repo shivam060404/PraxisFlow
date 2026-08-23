@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
+import { Slot } from "@radix-ui/react-slot";
 import { cn } from "@/lib/utils";
 
 const Sidebar = React.forwardRef<
-  HTMLAsideElement,
+  HTMLElement,
   React.ComponentPropsWithoutRef<"aside">
 >(({ className, ...props }, ref) => (
   <aside
@@ -58,7 +59,7 @@ const SidebarMenuButton = React.forwardRef<
   HTMLButtonElement,
   React.ComponentPropsWithoutRef<"button"> & { asChild?: boolean }
 >(({ asChild = false, className, children, ...props }, ref) => {
-  const Comp = asChild ? React.Fragment : "button";
+  const Comp: React.ElementType = asChild ? Slot : "button";
   return (
     <Comp
       ref={ref}

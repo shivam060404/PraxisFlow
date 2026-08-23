@@ -135,7 +135,7 @@ class TestAsanaAdapter:
     """Test Asana adapter."""
     
     def test_format_description(self):
-        from app.integrations.jira import AsanaAdapter
+        from app.integrations.asana import AsanaAdapter
         
         adapter = AsanaAdapter()
         task = MagicMock(
@@ -158,7 +158,7 @@ class TestAsanaAdapter:
         assert "Test description" in description
     
     def test_normalize_webhook(self):
-        from app.integrations.jira import AsanaAdapter
+        from app.integrations.asana import AsanaAdapter
         
         adapter = AsanaAdapter()
         
@@ -181,7 +181,7 @@ class TestLinearAdapter:
     """Test Linear adapter."""
     
     def test_format_description(self):
-        from app.integrations.jira import LinearAdapter
+        from app.integrations.linear import LinearAdapter
         
         adapter = LinearAdapter()
         task = MagicMock(
@@ -200,11 +200,12 @@ class TestLinearAdapter:
         assert "meet_123" in description
         assert "ACTION_ITEM" in description
         assert "90%" in description
-        assert "> Test quote" in description
+        assert "Original Quote:" in description
+        assert task.source_quote in description
         assert "Test description" in description
     
     def test_normalize_webhook(self):
-        from app.integrations.jira import LinearAdapter
+        from app.integrations.linear import LinearAdapter
         
         adapter = LinearAdapter()
         
@@ -229,7 +230,7 @@ class TestSlackAdapter:
     """Test Slack adapter."""
     
     def test_format_slack_message(self):
-        from app.integrations.jira import SlackAdapter
+        from app.integrations.slack import SlackAdapter
         
         adapter = SlackAdapter()
         task = MagicMock(
@@ -248,7 +249,7 @@ class TestSlackAdapter:
         assert len(blocks) > 0
         # Check header block
         assert blocks[0]["type"] == "header"
-        assert "ACTION_ITEM" in blocks[0]["text"]["text"]
+        assert "Action Item" in blocks[0]["text"]["text"]
         # Check section with title
         section_blocks = [b for b in blocks if b["type"] == "section"]
         assert len(section_blocks) >= 2

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { Tooltip } from "recharts";
 import { cn } from "@/lib/utils";
 
 const ChartContainer = React.forwardRef<
@@ -27,8 +28,8 @@ ChartContainer.displayName = "ChartContainer";
 
 const ChartTooltip = React.forwardRef<
   React.ElementRef<typeof Tooltip>,
-  React.ComponentPropsWithoutRef<typeof Tooltip>
->(({ className, ...props }, ref) => (
+  Omit<React.ComponentPropsWithoutRef<typeof Tooltip>, "content">
+>(({ ...props }, ref) => (
   <Tooltip ref={ref} content={<ChartTooltipContent />} {...props} />
 ));
 ChartTooltip.displayName = "ChartTooltip";

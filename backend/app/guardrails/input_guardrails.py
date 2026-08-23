@@ -260,6 +260,8 @@ class TopicBoundaryGuard(BaseGuardrail):
         "personal_advice": [
             "medical advice", "legal advice", "financial advice",
             "investment", "crypto", "gambling", "relationship advice",
+            "medication", "medicine", "diagnosis", "prescription",
+            "symptoms", "treatment", "dosage",
         ],
     }
 
@@ -300,7 +302,19 @@ class TopicBoundaryGuard(BaseGuardrail):
                     confidence=0.8,
                 )
         else:
-            # Lenient: warn if heavily off-topic
+            # Lenient: block clearly off-domain input (no meeting relevance
+            # but explicit off-topic content), flag mixed content.
+            if meeting_score == 0 and total_off_topic > 0:
+                return self._create_result(
+                    action=GuardrailAction.BLOCK,
+                    severity=GuardrailSeverity.WARNING,
+                    message="Input outside meeting processing domain",
+                    metadata={
+                        "meeting_score": meeting_score,
+                        "off_topic_scores": off_topic_scores,
+                    },
+                    confidence=0.8,
+                )
             if total_off_topic > meeting_score and total_off_topic > 2:
                 return self._create_result(
                     action=GuardrailAction.FLAG,
@@ -426,43 +440,109 @@ class TenantIsolationGuard(BaseGuardrail):
     def __init__(self, enabled: bool = True):
         super().__init__("tenant_isolation", GuardrailLayer.INPUT, enabled)
         self.uuid_pattern = re.compile(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', re.IGNORECASE)
+        self.tenant_ref_pattern = re.compile(r'\btenant[-_:][A-Za-z0-9_-]+\b', re.IGNORECASE)
 
     async def check(self, content: str, context: GuardrailContext) -> GuardrailResult:
         if not self.enabled:
             return self._create_result(GuardrailAction.ALLOW, GuardrailSeverity.INFO, "Disabled")
 
+        suspicious = []
+
         uuids = self.uuid_pattern.findall(content)
-
-        if uuids:
+        for uuid in uuids:
             # Check if any UUID doesn't match current context
-            suspicious = []
-            for uuid in uuids:
-                if (uuid != context.tenant_id and
-                    uuid != context.meeting_id and
-                    uuid != context.user_id and
-                    uuid not in context.prior_extractions):
-                    suspicious.append(uuid)
+            if (uuid != context.tenant_id and
+                uuid != context.meeting_id and
+                uuid != context.user_id and
+                uuid not in context.prior_extractions):
+                suspicious.append(uuid)
 
-            if suspicious:
-                logger.warning(f"Potential cross-tenant reference for tenant {context.tenant_id}: {suspicious}")
-                return self._create_result(
-                    action=GuardrailAction.FLAG,
-                    severity=GuardrailSeverity.WARNING,
-                    message="Potential cross-tenant reference detected",
-                    metadata={"referenced_uuids": suspicious},
-                    confidence=0.6,
-                )
+        # Also catch slug-style tenant references, e.g. "tenant-999"
+        current_tenant = str(context.tenant_id).lower()
+        for ref in self.tenant_ref_pattern.findall(content):
+            if ref.lower() != current_tenant and ref not in suspicious:
+                suspicious.append(ref)
+
+        if suspicious:
+            logger.warning(f"Potential cross-tenant reference for tenant {context.tenant_id}: {suspicious}")
+            return self._create_result(
+                action=GuardrailAction.FLAG,
+                severity=GuardrailSeverity.WARNING,
+                message="Potential cross-tenant reference detected",
+                metadata={"referenced_uuids": suspicious},
+                confidence=0.6,
+            )
 
         return self._create_result(GuardrailAction.ALLOW, GuardrailSeverity.INFO, "Tenant isolation OK")
 
 
+# ─── Input Guardrails Runner ───
+
+class InputGuardrailsRunner:
+    """Runs input guardrails in sequence and aggregates results."""
+
+    def __init__(self, guardrails: List[BaseGuardrail], enabled: bool = True):
+        self.enabled = enabled
+        self.guardrails = guardrails
+
+    async def run(self, content: str, context: GuardrailContext) -> List[GuardrailResult]:
+        """Run all input guardrails, threading modified content through."""
+        if not self.enabled:
+            return []
+
+        results = []
+        modified_content = content
+
+        for guardrail in self.guardrails:
+            result = await guardrail.check(modified_content, context)
+            results.append(result)
+
+            if result.modified_content:
+                modified_content = result.modified_content
+
+            # Stop on BLOCK — no point evaluating further
+            if result.action == GuardrailAction.BLOCK:
+                break
+
+        return results
+
+    def get_final_action(self, results: List[GuardrailResult]) -> GuardrailAction:
+        """Determine final action from all results."""
+        priority = {
+            GuardrailAction.BLOCK: 6,
+            GuardrailAction.REDACT: 5,
+            GuardrailAction.ROUTE_TO_HUMAN: 4,
+            GuardrailAction.RETRY: 3,
+            GuardrailAction.FLAG: 2,
+            GuardrailAction.ALLOW: 1,
+        }
+
+        if not results:
+            return GuardrailAction.ALLOW
+
+        max_priority = max(priority.get(r.action, 0) for r in results)
+        for action, p in priority.items():
+            if p == max_priority:
+                return action
+
+        return GuardrailAction.ALLOW
+
+    def get_modified_content(self, results: List[GuardrailResult], original: str) -> str:
+        """Return the most-modified content produced by the pipeline."""
+        modified = original
+        for result in results:
+            if result.modified_content:
+                modified = result.modified_content
+        return modified
+
+
 # ─── Input Guardrails Factory ───
 
-def create_input_guardrails(config: Dict[str, Any] = None) -> List[BaseGuardrail]:
+def create_input_guardrails(config: Dict[str, Any] = None) -> InputGuardrailsRunner:
     """Create standard input guardrails pipeline."""
     config = config or {}
 
-    return [
+    return InputGuardrailsRunner([
         PromptInjectionDetector(
             enabled=config.get("injection_detection", True),
             use_ml_classifier=config.get("use_ml_injection_classifier", False),
@@ -486,4 +566,4 @@ def create_input_guardrails(config: Dict[str, Any] = None) -> List[BaseGuardrail
         TenantIsolationGuard(
             enabled=config.get("tenant_isolation", True),
         ),
-    ]
+    ])

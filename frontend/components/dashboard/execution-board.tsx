@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  DndContext,
   DragEndEvent,
   closestCenter,
   KeyboardSensor,
@@ -18,7 +19,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { useUIStore } from "@/lib/store";
-import { api, type Task, type PaginatedResponse } from "@/lib/api";
+import { api, type Task, type PaginatedResponse, type TaskStatus } from "@/lib/api";
 import { cn, getStatusColor, getPriorityColor, formatRelativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -45,15 +46,6 @@ import { TaskCard } from "./task-card";
 import { Column } from "./column";
 import { FilterSidebar } from "./filter-sidebar";
 import { TaskDetailPanel } from "./task-detail-panel";
-
-export type TaskStatus =
-  | "EXTRACTED"
-  | "PENDING_REVIEW"
-  | "VERIFIED"
-  | "ASSIGNED"
-  | "SYNCED"
-  | "COMPLETED"
-  | "DISMISSED";
 
 export const KANBAN_COLUMNS: { id: TaskStatus; title: string; color: string }[] = [
   { id: "EXTRACTED", title: "Extracted", color: "extracted" },
@@ -132,12 +124,12 @@ export function ExecutionBoard() {
 
       // Check if dropped on a column
       const targetColumn = over.id as TaskStatus;
-      const activeTask = tasksResponse?.items.find((t) => t.id === active.id);
+      const activeTask = tasksResponse?.items.find((t: Task) => t.id === active.id);
       
       if (!activeTask) return;
 
       // Validate transition
-      const validTargets = VALID_TRANSITIONS[activeTask.status] || [];
+      const validTargets = VALID_TRANSITIONS[activeTask.status as TaskStatus] || [];
       if (!validTargets.includes(targetColumn)) {
         // Invalid transition - show feedback
         return;
@@ -154,7 +146,7 @@ export function ExecutionBoard() {
   // Group tasks by status
   const tasksByStatus = React.useMemo(() => {
     return KANBAN_COLUMNS.reduce((acc, column) => {
-      acc[column.id] = tasksResponse?.items.filter((t) => t.status === column.id) || [];
+      acc[column.id] = tasksResponse?.items.filter((t: Task) => t.status === column.id) || [];
       return acc;
     }, {} as Record<TaskStatus, Task[]>);
   }, [tasksResponse]);
@@ -201,22 +193,27 @@ export function ExecutionBoard() {
 
       {/* Kanban Board */}
       <div className="flex-1 overflow-auto p-4">
-        <SortableContext
-          items={KANBAN_COLUMNS.map((c) => c.id)}
-          strategy={verticalListSortingStrategy}
+        <DndContext
+          sensors={sensors}
           collisionDetection={closestCenter}
+          onDragEnd={handleDragEnd}
         >
-          <div className="flex gap-4 h-full min-h-0">
-            {KANBAN_COLUMNS.map((column) => (
-              <Column
-                key={column.id}
-                column={column}
-                tasks={tasksByStatus[column.id]}
-                onTaskClick={(task) => useUIStore.getState().openTaskDetail(task)}
-              />
-            ))}
-          </div>
-        </SortableContext>
+          <SortableContext
+            items={KANBAN_COLUMNS.map((c) => c.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="flex gap-4 h-full min-h-0">
+              {KANBAN_COLUMNS.map((column) => (
+                <Column
+                  key={column.id}
+                  column={column}
+                  tasks={tasksByStatus[column.id]}
+                  onTaskClick={(task: Task) => useUIStore.getState().openTaskDetail(task)}
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
       </div>
 
       {/* Task Detail Panel */}

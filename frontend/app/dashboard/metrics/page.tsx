@@ -30,6 +30,7 @@ import {
   PieChart,
   Pie,
   Cell,
+  Legend,
 } from "recharts";
 
 const COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"];
@@ -114,8 +115,8 @@ function ExtractionAccuracyChart({ data }: { data: MetricsData["accuracyByWeek"]
               </defs>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="week" />
-              <YAxis domain={[0, 1]} tickFormatter={(v) => `${Math.round(v * 100)}%`} />
-              <Tooltip formatter={(v) => [`${Math.round(v * 100)}%`, ""]} />
+              <YAxis domain={[0, 1]} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} />
+              <Tooltip formatter={(v: number) => [`${Math.round(v * 100)}%`, ""]} />
               <Legend />
               <Line type="monotone" dataKey="precision" stroke={COLORS[0]} strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="recall" stroke={COLORS[1]} strokeWidth={2} dot={false} />

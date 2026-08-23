@@ -36,7 +36,7 @@ celery_app.conf.update(
 celery_app.conf.task_routes = {
     "app.workers.tasks.process_meeting": {"queue": "asr"},
     "app.workers.tasks.run_extraction": {"queue": "extraction"},
-    "app.workers.tasks.sync_task_to_integration": {"queue": "integrations"},
+    "app.workers.tasks.sync_task_to_integrations": {"queue": "integrations"},
     "app.workers.tasks.retry_failed_sync": {"queue": "integrations"},
 }
 

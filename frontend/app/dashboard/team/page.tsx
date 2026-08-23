@@ -32,8 +32,6 @@ export default function TeamPage() {
     role: "member",
   });
 
-  const queryClient = React.useContext(require("@tanstack/react-query").QueryClientProvider)._context?.client;
-  
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["users", { search }],
     queryFn: () => api.getUsers({ search }),
@@ -150,7 +148,7 @@ export default function TeamPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {data?.items.map((user) => (
+              {data?.items.map((user: User) => (
                 <Card key={user.id} className="hover:shadow-md transition-shadow">
                   <CardContent className="p-4">
                     <div className="flex items-center justify-between">
@@ -191,7 +189,8 @@ export default function TeamPage() {
                             <Trash2 className="h-4 w-4 mr-2" />
                             Remove from Team
                           </DropdownMenuItem>
-                        </DropdownMenuContent                      </DropdownMenu>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
                     <div className="mt-3 flex items-center gap-2">
                       <Badge variant="outline" className={roleColors[user.role] || "bg-muted text-muted-foreground"}>

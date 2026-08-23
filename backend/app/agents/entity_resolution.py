@@ -225,13 +225,13 @@ class EntityResolutionAgent:
         """
         import re
         
-        # Pattern: "X from Y" or "X in Y" or "X of Y"
+        # Pattern: "X from Y" / "X in Y" / "X of Y" / "Y team" / "Y department"
         patterns = [
             r"\bfrom\s+(\w+)",
             r"\bin\s+(\w+)",
             r"\bof\s+(\w+)",
-            r"\bteam\s+(\w+)",
-            r"\bdepartment\s+(\w+)",
+            r"(\w+)\s+team\b",
+            r"(\w+)\s+department\b",
         ]
         
         for pattern in patterns:

@@ -13,7 +13,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Loader2, Settings, Plug, Zap, TestTube, Save, Check, AlertCircle, X, ExternalLink, RefreshCw } from "lucide-react";
+import { Loader2, Settings, Plug, Zap, TestTube, Save, Check, AlertCircle, X, ExternalLink, RefreshCw, MoreVertical, Trash2 } from "lucide-react";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
@@ -101,7 +103,7 @@ export default function SettingsPage() {
   const testIntegrationMutation = useMutation({
     mutationFn: (id: string) => api.testIntegration(id),
     onSuccess: (data, id) => {
-      const integration = integrationsData?.items.find(i => i.id === id);
+      const integration = integrationsData?.items.find((i: Integration) => i.id === id);
       if (data.success) {
         toast.success(`${integration?.display_name || "Integration"} connected successfully!`);
       } else {
@@ -109,7 +111,7 @@ export default function SettingsPage() {
       }
     },
     onError: (error: any, id) => {
-      const integration = integrationsData?.items.find(i => i.id === id);
+      const integration = integrationsData?.items.find((i: Integration) => i.id === id);
       toast.error(`${integration?.display_name || "Integration"} test failed: ${error.response?.data?.detail || "Connection failed"}`);
     },
   });
@@ -236,7 +238,8 @@ export default function SettingsPage() {
                           <SelectItem value="asana">Asana</SelectItem>
                           <SelectItem value="linear">Linear</SelectItem>
                           <SelectItem value="slack">Slack</SelectItem>
-                        </SelectContent                      </Select>
+                        </SelectContent>
+                      </Select>
                     </div>
                     <div className="grid grid-cols-4 items-center gap-4">
                       <Label htmlFor="display_name" className="text-right">Display Name</Label>
@@ -287,13 +290,13 @@ export default function SettingsPage() {
               </div>
             ) : (
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {integrationsData?.items.map((integration) => (
+                {integrationsData?.items.map((integration: Integration) => (
                   <Card key={integration.id} className={editingIntegration?.id === integration.id ? "ring-2 ring-primary" : ""}>
                     <CardHeader className="pb-2">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           <div className={cn("p-2 rounded-lg", integrationColors[integration.provider])}>
-                            <integrationIcons[integration.provider] className="h-5 w-5" />
+                            {React.createElement(integrationIcons[integration.provider] ?? Plug, { className: "h-5 w-5" })}
                           </div>
                           <div>
                             <h3 className="font-semibold">{integration.display_name}</h3>
@@ -334,7 +337,7 @@ export default function SettingsPage() {
                                 <Trash2 className="h-4 w-4 mr-2" />
                                 Delete
                               </DropdownMenuItem>
-                            </DropdownMenuContent
+                            </DropdownMenuContent>
                           </DropdownMenu>
                         )}
                       </div>
@@ -459,7 +462,7 @@ export default function SettingsPage() {
                       disabled
                     />
                   </div>
-                  <Button>
+                  <Button>Save Changes</Button>
                 </div>
               </CardContent>
             </Card>
