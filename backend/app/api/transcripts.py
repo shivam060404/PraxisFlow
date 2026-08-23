@@ -4,6 +4,7 @@ from uuid import UUID
 
 from app.db.prisma import get_db
 from app.schemas import Transcript, Utterance, TranscriptChunk, PaginatedResponse
+from app.security import get_current_subject, Subject
 
 router = APIRouter(prefix="/transcripts", tags=["Transcripts"])
 
@@ -11,11 +12,12 @@ router = APIRouter(prefix="/transcripts", tags=["Transcripts"])
 @router.get("/meeting/{meeting_id}", response_model=Transcript)
 async def get_transcript_by_meeting(
     meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get transcript for a meeting."""
-    transcript = await db.transcript.find_unique(
-        where={"meetingId": str(meeting_id)},
+    transcript = await db.transcript.find_first(
+        where={"meetingId": str(meeting_id), "meeting": {"tenantId": subject.tenant_id}},
         include={"utterances": {"orderBy": {"startTimeMs": "asc"}}},
     )
     
@@ -31,11 +33,12 @@ async def get_transcript_by_meeting(
 @router.get("/{transcript_id}", response_model=Transcript)
 async def get_transcript(
     transcript_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get transcript by ID."""
-    transcript = await db.transcript.find_unique(
-        where={"id": str(transcript_id)},
+    transcript = await db.transcript.find_first(
+        where={"id": str(transcript_id), "meeting": {"tenantId": subject.tenant_id}},
         include={"utterances": {"orderBy": {"startTimeMs": "asc"}}},
     )
     
@@ -54,10 +57,13 @@ async def get_utterances(
     start_time_ms: Optional[int] = Query(None, ge=0),
     end_time_ms: Optional[int] = Query(None, ge=0),
     speaker_label: Optional[str] = None,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get utterances for a transcript with optional filtering."""
-    transcript = await db.transcript.find_unique(where={"id": str(transcript_id)})
+    transcript = await db.transcript.find_first(
+        where={"id": str(transcript_id), "meeting": {"tenantId": subject.tenant_id}}
+    )
     if not transcript:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -85,11 +91,12 @@ async def get_transcript_chunks(
     transcript_id: UUID,
     chunk_size: int = Query(2000, ge=100, le=5000),
     overlap: int = Query(200, ge=0, le=1000),
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get transcript split into chunks for processing."""
-    transcript = await db.transcript.find_unique(
-        where={"id": str(transcript_id)},
+    transcript = await db.transcript.find_first(
+        where={"id": str(transcript_id), "meeting": {"tenantId": subject.tenant_id}},
         include={"utterances": {"orderBy": {"startTimeMs": "asc"}}},
     )
     
@@ -144,11 +151,12 @@ async def get_transcript_span(
     transcript_id: UUID,
     word_start: int = Query(..., ge=0),
     word_end: int = Query(..., ge=0),
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get transcript text for a specific word span."""
-    transcript = await db.transcript.find_unique(
-        where={"id": str(transcript_id)},
+    transcript = await db.transcript.find_first(
+        where={"id": str(transcript_id), "meeting": {"tenantId": subject.tenant_id}},
         include={"utterances": {"orderBy": {"startTimeMs": "asc"}}},
     )
     
@@ -203,11 +211,12 @@ async def get_transcript_span_by_meeting(
     meeting_id: UUID,
     word_start: int = Query(..., ge=0),
     word_end: int = Query(..., ge=0),
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get transcript text for a specific word span by meeting ID."""
-    transcript = await db.transcript.find_unique(
-        where={"meetingId": str(meeting_id)},
+    transcript = await db.transcript.find_first(
+        where={"meetingId": str(meeting_id), "meeting": {"tenantId": subject.tenant_id}},
         include={"utterances": {"orderBy": {"startTimeMs": "asc"}}},
     )
     
@@ -262,11 +271,12 @@ async def search_transcript(
     transcript_id: UUID,
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Search transcript for a query string."""
-    transcript = await db.transcript.find_unique(
-        where={"id": str(transcript_id)},
+    transcript = await db.transcript.find_first(
+        where={"id": str(transcript_id), "meeting": {"tenantId": subject.tenant_id}},
         include={"utterances": {"orderBy": {"startTimeMs": "asc"}}},
     )
     

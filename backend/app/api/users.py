@@ -4,6 +4,7 @@ from uuid import UUID
 
 from app.db.prisma import get_db
 from app.schemas import User, UserCreate, PaginatedResponse
+from app.security import get_current_subject, Subject
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -11,12 +12,13 @@ router = APIRouter(prefix="/users", tags=["Users"])
 @router.post("", response_model=User, status_code=status.HTTP_201_CREATED)
 async def create_user(
     user_data: UserCreate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """Create a new user."""
+    """Create a new user. Tenant comes from the verified token."""
     user = await db.user.create(
         data={
-            "tenantId": str(user_data.tenant_id),
+            "tenantId": subject.tenant_id,
             "email": user_data.email,
             "fullName": user_data.full_name,
             "avatarUrl": user_data.avatar_url,
@@ -32,10 +34,11 @@ async def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """List users with pagination and search."""
-    where = {}
+    """List users with pagination and search (tenant-scoped)."""
+    where = {"tenantId": subject.tenant_id}
     if search:
         where["OR"] = [
             {"fullName": {"contains": search, "mode": "insensitive"}},
@@ -62,10 +65,11 @@ async def list_users(
 @router.get("/{user_id}", response_model=User)
 async def get_user(
     user_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """Get a single user by ID."""
-    user = await db.user.find_unique(where={"id": str(user_id)})
+    """Get a single user by ID (tenant-scoped)."""
+    user = await db.user.find_first(where={"id": str(user_id), "tenantId": subject.tenant_id})
     
     if not user:
         raise HTTPException(
@@ -78,13 +82,19 @@ async def get_user(
 
 @router.get("/me/profile", response_model=User)
 async def get_current_user_profile(
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """Get current user's profile (from JWT)."""
-    # TODO: Get user_id from JWT token
-    # For now, return first user in tenant
+    """Get the authenticated user's profile.
+
+    Resolves by internal id first; falls back to the Clerk user id for
+    tokens minted before a local user row existed.
+    """
     user = await db.user.find_first(
-        where={"tenantId": "00000000-0000-0000-0000-000000000001"}
+        where={
+            "tenantId": subject.tenant_id,
+            "OR": [{"id": subject.id}, {"clerkUserId": subject.id}],
+        }
     )
     
     if not user:

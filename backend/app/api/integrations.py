@@ -8,6 +8,7 @@ from app.schemas import (
     Integration, IntegrationCreate, IntegrationUpdate, IntegrationProvider,
     PaginatedResponse, to_prisma_data
 )
+from app.security import get_current_subject, Subject
 from app.integrations.factory import IntegrationAdapterFactory
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
@@ -16,13 +17,14 @@ router = APIRouter(prefix="/integrations", tags=["Integrations"])
 @router.post("", response_model=Integration, status_code=status.HTTP_201_CREATED)
 async def create_integration(
     integration_data: IntegrationCreate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Create a new integration."""
     # Check if integration already exists for this tenant/provider
     existing = await db.integration.find_first(
         where={
-            "tenantId": str(integration_data.tenant_id),
+            "tenantId": subject.tenant_id,
             "provider": integration_data.provider,
         }
     )
@@ -34,7 +36,7 @@ async def create_integration(
     
     integration = await db.integration.create(
         data={
-            "tenantId": str(integration_data.tenant_id),
+            "tenantId": subject.tenant_id,
             "provider": integration_data.provider,
             "displayName": integration_data.display_name,
             "config": integration_data.config,
@@ -50,11 +52,13 @@ async def create_integration(
 async def list_integrations(
     page: int = 1,
     page_size: int = 20,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """List all integrations for the current tenant."""
     total = await db.integration.count()
     integrations = await db.integration.find_many(
+        where={"tenantId": subject.tenant_id},
         skip=(page - 1) * page_size,
         take=page_size,
         order={"createdAt": "desc"},
@@ -72,6 +76,7 @@ async def list_integrations(
 @router.get("/{integration_id}", response_model=Integration)
 async def get_integration(
     integration_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get a single integration."""
@@ -92,10 +97,13 @@ async def get_integration(
 async def update_integration(
     integration_id: UUID,
     integration_data: IntegrationUpdate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Update an integration."""
-    integration = await db.integration.find_unique(where={"id": str(integration_id)})
+    integration = await db.integration.find_first(
+        where={"id": str(integration_id), "tenantId": subject.tenant_id}
+    )
     if not integration:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -113,10 +121,13 @@ async def update_integration(
 @router.delete("/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_integration(
     integration_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Delete an integration."""
-    integration = await db.integration.find_unique(where={"id": str(integration_id)})
+    integration = await db.integration.find_first(
+        where={"id": str(integration_id), "tenantId": subject.tenant_id}
+    )
     if not integration:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -129,10 +140,13 @@ async def delete_integration(
 @router.post("/{integration_id}/test", response_model=dict)
 async def test_integration(
     integration_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Test an integration connection."""
-    integration = await db.integration.find_unique(where={"id": str(integration_id)})
+    integration = await db.integration.find_first(
+        where={"id": str(integration_id), "tenantId": subject.tenant_id}
+    )
     if not integration:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -148,110 +162,36 @@ async def test_integration(
 
 
 # ─── Webhook Handlers ───
+# All provider webhooks are handled by the canonical, HMAC-verified receiver
+# in app/api/webhooks.py (multi-tenant secret matching, normalized events,
+# audit logging). These thin aliases keep the historical /integrations/webhooks
+# URLs working without duplicating security-sensitive logic.
+
+async def _delegate_webhook(provider: str, request: Request):
+    from app.api.webhooks import receive_webhook
+
+    return await receive_webhook(provider, request, request.headers.get("X-Webhook-Secret"))
+
 
 @router.post("/webhooks/jira")
-async def jira_webhook(
-    request: Request,
-    db=Depends(get_db),
-):
-    """Handle Jira webhooks."""
-    payload = await request.json()
-    
-    # Find integration by webhook secret
-    signature = request.headers.get("X-Hub-Signature-256", "")
-    integration = await db.integration.find_first(
-        where={"provider": "jira", "webhookSecret": signature}
-    )
-    
-    if not integration:
-        # Try to find by other means
-        integration = await db.integration.find_first(
-            where={"provider": "jira", "status": "ACTIVE"}
-        )
-    
-    if not integration:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No active Jira integration found",
-        )
-    
-    # Process webhook
-    from app.integrations.jira import JiraAdapter
-    adapter = JiraAdapter()
-    normalized = adapter.normalize_webhook(payload)
-    
-    # Find our internal task
-    task = await db.task.find_first(
-        where={
-            "externalId": normalized.external_id,
-            "integrationId": integration.id,
-        }
-    )
-    
-    if not task:
-        return {"status": "ignored", "reason": "Task not found in our system"}
-    
-    # Update task status based on webhook
-    if normalized.status == "done" and task.status != "COMPLETED":
-        await db.task.update(
-            where={"id": task.id},
-            data={
-                "status": "COMPLETED",
-                "updatedAt": datetime.utcnow(),
-            }
-        )
-        
-        # Audit log
-        await db.taskauditlog.create(
-            data={
-                "taskId": task.id,
-                "previousStatus": task.status,
-                "newStatus": "COMPLETED",
-                "changedBy": f"integration:jira",
-                "reason": f"Marked done in Jira",
-            }
-        )
-    
-    return {"status": "processed", "task_id": task.id}
+async def jira_webhook(request: Request):
+    """Jira webhook (delegates to canonical verified receiver)."""
+    return await _delegate_webhook("jira", request)
 
 
 @router.post("/webhooks/asana")
-async def asana_webhook(
-    request: Request,
-    db=Depends(get_db),
-):
-    """Handle Asana webhooks."""
-    payload = await request.json()
-    
-    # Asana sends events array
-    events = payload.get("events", [])
-    
-    for event in events:
-        # Process each event
-        pass
-    
-    return {"status": "received", "events": len(events)}
+async def asana_webhook(request: Request):
+    """Asana webhook (delegates to canonical verified receiver)."""
+    return await _delegate_webhook("asana", request)
 
 
 @router.post("/webhooks/linear")
-async def linear_webhook(
-    request: Request,
-    db=Depends(get_db),
-):
-    """Handle Linear webhooks."""
-    payload = await request.json()
-    
-    # Process Linear webhook
-    return {"status": "received"}
+async def linear_webhook(request: Request):
+    """Linear webhook (delegates to canonical verified receiver)."""
+    return await _delegate_webhook("linear", request)
 
 
 @router.post("/webhooks/slack")
-async def slack_webhook(
-    request: Request,
-    db=Depends(get_db),
-):
-    """Handle Slack webhooks/events."""
-    payload = await request.json()
-    
-    # Handle Slack events (reactions, messages, etc.)
-    return {"status": "received"}
+async def slack_webhook(request: Request):
+    """Slack webhook (delegates to canonical verified receiver)."""
+    return await _delegate_webhook("slack", request)

@@ -94,10 +94,14 @@ manager = ConnectionManager()
 
 
 async def get_tenant_user_from_token(token: str) -> tuple[str, str]:
-    """Extract tenant_id and user_id from JWT token."""
-    # TODO: Implement actual JWT validation
-    # For now, return dev values
-    return "00000000-0000-0000-0000-000000000001", "dev-user-1"
+    """Verify the WebSocket token with the shared verifier and return identity."""
+    from app.security.auth import verify_access_token, AuthError
+
+    try:
+        verified = await verify_access_token(token)
+        return verified.tenant_id, verified.user_id
+    except AuthError as e:
+        raise ValueError(f"Invalid websocket token: {e}")
 
 
 @router.websocket("")

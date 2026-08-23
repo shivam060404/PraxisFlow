@@ -11,7 +11,6 @@ from typing import Callable, Dict, Any, Optional, Set
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
-from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from redis.asyncio import Redis
 
@@ -39,88 +38,94 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.exempt_paths = exempt_paths or self.EXEMPT_PATHS
 
+    # Webhook receivers authenticate via provider HMAC signatures instead of
+    # user JWTs. Only concrete provider slugs are exempt — management paths
+    # (/webhooks/register) and HITL paths (/webhooks/hitl/*) stay JWT-gated.
+    WEBHOOK_RECEIVER_PREFIX = "/api/v1/webhooks/"
+    WEBHOOK_RECEIVER_PROVIDERS = {"jira", "asana", "linear", "github", "slack", "teams", "gitlab"}
+
+    def _is_webhook_receiver(self, request: Request) -> bool:
+        path = request.url.path
+        if not path.startswith(self.WEBHOOK_RECEIVER_PREFIX):
+            return False
+        rest = path[len(self.WEBHOOK_RECEIVER_PREFIX):]
+        return rest.lower() in self.WEBHOOK_RECEIVER_PROVIDERS and request.method == "POST"
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Skip exempt paths
         if request.url.path in self.exempt_paths:
             return await call_next(request)
 
+        # Provider webhook receivers are HMAC-authenticated inside the router
+        if self._is_webhook_receiver(request):
+            return await call_next(request)
+
         # Extract tenant from Authorization header
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
+        from app.security.auth import verify_access_token, extract_bearer_token, AuthError
+
+        token = extract_bearer_token(request.headers.get("Authorization"))
+        if not token:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Missing or invalid Authorization header"},
             )
 
-        token = auth_header.replace("Bearer ", "")
-
-        # Validate JWT and extract claims
-        # In production, use python-jose or similar
-        tenant_id = await self._validate_token(token)
-        if not tenant_id:
+        try:
+            verified = await verify_access_token(token)
+        except AuthError as e:
+            logger.warning(f"Token validation failed: {e}")
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Invalid or expired token"},
             )
 
-        # Verify tenant exists and is active
-        if not await self._verify_tenant(tenant_id):
+        # Verify the tenant exists and is active (cached briefly per process)
+        if not await self._verify_tenant(verified.tenant_id):
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Tenant not found or inactive"},
             )
 
-        # Set tenant context on request state
-        request.state.tenant_id = tenant_id
-        request.state.user_id = await self._extract_user_id(token)
+        # Identity is authoritative here — routers must scope every query by
+        # these values and never trust client-supplied tenant identifiers.
+        request.state.tenant_id = verified.tenant_id
+        request.state.user_id = verified.user_id
+        request.state.role = verified.role
+        request.state.claims = verified.claims
 
-        # Set PostgreSQL RLS context
-        await self._set_rls_context(tenant_id)
+        # NOTE: Postgres RLS is NOT yet enforced on Prisma-generated tables.
+        # Tenant isolation is enforced at the application layer until the
+        # schema is aligned (@@map + RLS policies). Do not rely on RLS here.
 
-        # Add tenant header for downstream services
         response = await call_next(request)
-        response.headers["X-Tenant-ID"] = tenant_id
+        response.headers["X-Tenant-ID"] = verified.tenant_id
 
         return response
 
-    async def _validate_token(self, token: str) -> Optional[str]:
-        """Validate JWT and return tenant_id."""
-        try:
-            from jose import jwt
-            from app.security.secrets import get_jwt_secret
-
-            secret = get_jwt_secret()
-            payload = jwt.decode(token, secret, algorithms=["HS256"])
-            return payload.get("tenant_id")
-        except Exception as e:
-            logger.warning(f"Token validation failed: {e}")
-            return None
-
-    async def _extract_user_id(self, token: str) -> Optional[str]:
-        """Extract user_id from JWT."""
-        try:
-            from jose import jwt
-            from app.security.secrets import get_jwt_secret
-
-            secret = get_jwt_secret()
-            payload = jwt.decode(token, secret, algorithms=["HS256"])
-            return payload.get("sub") or payload.get("user_id")
-        except Exception:
-            return None
+    _tenant_cache: Dict[str, tuple] = {}
 
     async def _verify_tenant(self, tenant_id: str) -> bool:
-        """Verify tenant exists and is active."""
-        # In production, check database/cache
-        return True
+        """Verify tenant exists and is active (60s in-process cache)."""
+        import time as _time
 
-    async def _set_rls_context(self, tenant_id: str):
-        """Set PostgreSQL Row-Level Security context."""
+        cached = self._tenant_cache.get(tenant_id)
+        if cached and (_time.time() - cached[1]) < 60:
+            return cached[0]
+
         try:
             from app.db.prisma import get_prisma
+
             db = await get_prisma()
-            await db.execute_raw(f"SET LOCAL app.current_tenant = '{tenant_id}'")
+            tenant = await db.tenant.find_unique(where={"id": tenant_id})
+            ok = bool(tenant and getattr(tenant, "status", "active") == "active")
         except Exception as e:
-            logger.error(f"Failed to set RLS context: {e}")
+            # Fail closed on DB errors — never authenticate against an
+            # unverifiable tenant during infrastructure outages.
+            logger.error(f"Tenant verification failed: {e}")
+            ok = False
+
+        self._tenant_cache[tenant_id] = (ok, _time.time())
+        return ok
 
 
 # ─── Rate Limiting Middleware ───

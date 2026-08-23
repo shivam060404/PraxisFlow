@@ -260,23 +260,47 @@ from fastapi import Depends, HTTPException, Request, status
 
 
 async def get_current_subject(request: Request) -> Subject:
-    """Get current subject from request state (set by TenantIsolationMiddleware)."""
+    """
+    Build the authorization subject from the VERIFIED token identity set by
+    TenantIsolationMiddleware. Falls back to verifying the Authorization
+    header directly (e.g. when the middleware was bypassed in tests).
+
+    The role comes from the token claim (normalized); the DB row remains the
+    source of truth for user lifecycle but is intentionally not queried here
+    to keep the hot path free of an extra round trip.
+    """
+    from app.security.auth import verify_access_token, extract_bearer_token, AuthError
+
     tenant_id = getattr(request.state, "tenant_id", None)
     user_id = getattr(request.state, "user_id", None)
-    
-    if not tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No tenant context",
-        )
-    
-    # In a real implementation, fetch user roles from database
-    # For now, create a basic subject
+    role = getattr(request.state, "role", None)
+
+    if not tenant_id or not user_id:
+        token = extract_bearer_token(request.headers.get("Authorization"))
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No authenticated identity on request",
+            )
+        try:
+            verified = await verify_access_token(token)
+        except AuthError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid token: {e}",
+            )
+        tenant_id, user_id, role = verified.tenant_id, verified.user_id, verified.role
+
+    try:
+        role_enum = Role(role)
+    except ValueError:
+        role_enum = Role.MEMBER
+
     return Subject(
-        id=user_id or "unknown",
+        id=user_id,
         tenant_id=tenant_id,
-        roles=[Role.MEMBER],  # Default role
-        attributes={},
+        roles=[role_enum],
+        attributes={"permissions": []},
     )
 
 

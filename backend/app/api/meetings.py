@@ -11,6 +11,7 @@ from app.schemas import (
     PaginatedResponse, ErrorResponse, to_prisma_data
 )
 from app.core.config import settings
+from app.security import get_current_subject, Subject
 from app.services.storage import StorageService
 from app.workers.tasks import process_meeting
 
@@ -20,12 +21,13 @@ router = APIRouter(prefix="/meetings", tags=["Meetings"])
 @router.post("", response_model=Meeting, status_code=status.HTTP_201_CREATED)
 async def create_meeting(
     meeting_data: MeetingCreate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """Create a new meeting record."""
+    """Create a new meeting record. Tenant is taken from the verified token."""
     meeting = await db.meeting.create(
         data={
-            "tenantId": str(meeting_data.tenant_id),
+            "tenantId": subject.tenant_id,
             "title": meeting_data.title,
             "description": meeting_data.description,
             "scheduledAt": meeting_data.scheduled_at,
@@ -45,10 +47,11 @@ async def upload_meeting(
     description: str = Form(""),
     scheduled_at: str = Form(...),
     duration_minutes: Optional[int] = Form(None),
-    tenant_id: str = Form(...),
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """Upload a meeting audio/video file."""
+    """Upload a meeting audio/video file. Tenant comes from the token."""
+    tenant_id = subject.tenant_id
     # Validate file type
     if file.content_type not in settings.ALLOWED_AUDIO_TYPES:
         raise HTTPException(
@@ -113,10 +116,11 @@ async def list_meetings(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[MeetingStatus] = None,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """List meetings with pagination and filtering."""
-    where = {}
+    """List meetings with pagination and filtering (tenant-scoped)."""
+    where = {"tenantId": subject.tenant_id}
     if status:
         where["status"] = status
     
@@ -141,6 +145,7 @@ async def list_meetings(
 @router.get("/{meeting_id}", response_model=Meeting)
 async def get_meeting(
     meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get a single meeting by ID."""
@@ -149,7 +154,7 @@ async def get_meeting(
         include={"transcript": True, "attendees": True, "tasks": True},
     )
     
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
@@ -162,11 +167,12 @@ async def get_meeting(
 async def update_meeting(
     meeting_id: UUID,
     meeting_data: MeetingUpdate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Update a meeting."""
     meeting = await db.meeting.find_unique(where={"id": str(meeting_id)})
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
@@ -183,11 +189,12 @@ async def update_meeting(
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_meeting(
     meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Delete a meeting."""
     meeting = await db.meeting.find_unique(where={"id": str(meeting_id)})
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
@@ -205,11 +212,12 @@ async def delete_meeting(
 async def add_attendee(
     meeting_id: UUID,
     attendee_data: AttendeeCreate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Add an attendee to a meeting."""
     meeting = await db.meeting.find_unique(where={"id": str(meeting_id)})
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
@@ -232,11 +240,12 @@ async def add_attendee(
 @router.get("/{meeting_id}/attendees", response_model=List[Attendee])
 async def list_attendees(
     meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """List attendees for a meeting."""
     meeting = await db.meeting.find_unique(where={"id": str(meeting_id)})
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
@@ -252,11 +261,12 @@ async def list_attendees(
 @router.post("/{meeting_id}/process", status_code=status.HTTP_202_ACCEPTED)
 async def reprocess_meeting(
     meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Reprocess a meeting (re-run ASR and extraction)."""
     meeting = await db.meeting.find_unique(where={"id": str(meeting_id)})
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
@@ -276,6 +286,7 @@ async def reprocess_meeting(
 @router.get("/{meeting_id}/status")
 async def get_meeting_status(
     meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get meeting processing status."""
@@ -283,7 +294,7 @@ async def get_meeting_status(
         where={"id": str(meeting_id)},
         include={"transcript": True},
     )
-    if not meeting:
+    if not meeting or meeting.tenantId != subject.tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",

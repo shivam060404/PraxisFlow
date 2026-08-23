@@ -3,38 +3,42 @@ from typing import List, Dict, Any
 from datetime import datetime, timedelta
 
 from app.db.prisma import get_db
+from app.security import get_current_subject, Subject
 
 router = APIRouter(prefix="/metrics", tags=["Metrics"])
 
 
 @router.get("")
 async def get_metrics(
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """
     Team accountability metrics — computed live from the database.
     Every figure here is a real aggregate; nothing is hardcoded.
     """
-    total_meetings = await db.meeting.count()
-    total_tasks = await db.task.count()
+    tid = subject.tenant_id
+    total_meetings = await db.meeting.count(where={"tenantId": tid})
+    total_tasks = await db.task.count(where={"tenantId": tid})
 
     # Verification funnel
-    verified_tasks = await db.task.count(where={"verificationStatus": "VERIFIED"})
+    verified_tasks = await db.task.count(where={"tenantId": tid, "verificationStatus": "VERIFIED"})
     verification_rate = round((verified_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
 
     # Funnel data (real status counts)
     funnel_data = [
-        {"stage": "Extracted", "count": await db.task.count(where={"status": "EXTRACTED"})},
-        {"stage": "Verified", "count": await db.task.count(where={"status": "VERIFIED"})},
-        {"stage": "Assigned", "count": await db.task.count(where={"status": "ASSIGNED"})},
-        {"stage": "Synced", "count": await db.task.count(where={"status": "SYNCED"})},
-        {"stage": "Completed", "count": await db.task.count(where={"status": "COMPLETED"})},
+        {"stage": "Extracted", "count": await db.task.count(where={"tenantId": tid, "status": "EXTRACTED"})},
+        {"stage": "Verified", "count": await db.task.count(where={"tenantId": tid, "status": "VERIFIED"})},
+        {"stage": "Assigned", "count": await db.task.count(where={"tenantId": tid, "status": "ASSIGNED"})},
+        {"stage": "Synced", "count": await db.task.count(where={"tenantId": tid, "status": "SYNCED"})},
+        {"stage": "Completed", "count": await db.task.count(where={"tenantId": tid, "status": "COMPLETED"})},
     ]
 
     # Avg time-to-sync: mean latency between task creation and first external
     # sync for tasks that have been synced (null until real syncs exist).
     synced_tasks = await db.task.find_many(
         where={
+            "tenantId": tid,
             "status": {"in": ["SYNCED", "COMPLETED"]},
             "lastSyncedAt": {"not": None},
         },
@@ -56,20 +60,13 @@ async def get_metrics(
     for weeks_back in range(3, -1, -1):
         week_start = now - timedelta(weeks=weeks_back + 1)
         week_end = now - timedelta(weeks=weeks_back)
-        created = await db.task.count(
-            where={"createdAt": {"gte": week_start, "lt": week_end}}
-        )
+        week_where = {"tenantId": tid, "createdAt": {"gte": week_start, "lt": week_end}}
+        created = await db.task.count(where=week_where)
         verified_wk = await db.task.count(
-            where={
-                "createdAt": {"gte": week_start, "lt": week_end},
-                "verificationStatus": "VERIFIED",
-            }
+            where={**week_where, "verificationStatus": "VERIFIED"}
         )
         dismissed_wk = await db.task.count(
-            where={
-                "createdAt": {"gte": week_start, "lt": week_end},
-                "status": "DISMISSED",
-            }
+            where={**week_where, "status": "DISMISSED"}
         )
         denom = verified_wk + dismissed_wk
         precision = round(verified_wk / denom, 2) if denom else 0.0
@@ -89,6 +86,7 @@ async def get_metrics(
 
     # Team performance: per-user real counts from assigned tasks.
     users = await db.user.find_many(
+        where={"tenantId": tid},
         select={"id": True, "fullName": True},
         take=100,
     )

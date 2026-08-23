@@ -137,6 +137,9 @@ cd backend
 pip install -r requirements.txt
 prisma generate
 prisma db push
+
+# Seed the dev tenant + admin user (required: auth fails closed without it)
+python scripts/seed_dev.py
 ```
 
 ### 4. Start Services

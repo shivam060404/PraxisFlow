@@ -54,7 +54,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     # Startup
     logger.info("Starting PraxisFlow Backend", environment=settings.ENVIRONMENT)
-    
+
+    # Refuse insecure production configuration before anything else runs
+    settings.validate_security_settings()
+
     # Initialize Prisma
     await get_prisma()
     

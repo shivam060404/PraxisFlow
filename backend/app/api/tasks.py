@@ -10,6 +10,7 @@ from app.schemas import (
     TaskAuditLog, TaskAuditLogCreate,
     PaginatedResponse, to_prisma_data
 )
+from app.security import get_current_subject, Subject
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -17,12 +18,13 @@ router = APIRouter(prefix="/tasks", tags=["Tasks"])
 @router.post("", response_model=Task, status_code=status.HTTP_201_CREATED)
 async def create_task(
     task_data: TaskCreate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Create a new task (usually called by extraction pipeline)."""
     task = await db.task.create(
         data={
-            "tenantId": str(task_data.tenant_id),
+            "tenantId": subject.tenant_id,
             "meetingId": str(task_data.meeting_id),
             "title": task_data.title,
             "description": task_data.description,
@@ -72,10 +74,11 @@ async def list_tasks(
     task_status: Optional[TaskStatus] = Query(None, alias="status"),
     task_type: Optional[TaskType] = None,
     priority: Optional[Priority] = None,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
-    """List tasks with pagination and filtering."""
-    where = {}
+    """List tasks with pagination and filtering (tenant-scoped)."""
+    where = {"tenantId": subject.tenant_id}
     if meeting_id:
         where["meetingId"] = str(meeting_id)
     if assignee_id:
@@ -108,11 +111,12 @@ async def list_tasks(
 @router.get("/{task_id}", response_model=Task)
 async def get_task(
     task_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get a single task by ID."""
-    task = await db.task.find_unique(
-        where={"id": str(task_id)},
+    task = await db.task.find_first(
+        where={"id": str(task_id), "tenantId": subject.tenant_id},
         include={"assignee": True, "meeting": True, "integration": True, "auditLogs": True},
     )
     
@@ -129,11 +133,12 @@ async def get_task(
 async def update_task(
     task_id: UUID,
     task_data: TaskUpdate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
-    changed_by: str = "api_user",
+    changed_by: Optional[str] = None,
 ):
     """Update a task with state machine validation."""
-    task = await db.task.find_unique(where={"id": str(task_id)})
+    task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -157,7 +162,7 @@ async def update_task(
                 "taskId": str(task_id),
                 "previousStatus": task.status,
                 "newStatus": new_status,
-                "changedBy": changed_by,
+                "changedBy": changed_by or subject.id,
                 "reason": update_data.get("reason", "Manual status update"),
             }
         )
@@ -175,11 +180,12 @@ async def verify_task(
     task_id: UUID,
     verification_status: VerificationStatus,
     reasoning: str = "",
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
-    changed_by: str = "api_user",
+    changed_by: Optional[str] = None,
 ):
     """Verify or reject a task (human-in-the-loop)."""
-    task = await db.task.find_unique(where={"id": str(task_id)})
+    task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -210,7 +216,7 @@ async def verify_task(
             "taskId": str(task_id),
             "previousStatus": task.status,
             "newStatus": new_status,
-            "changedBy": changed_by,
+            "changedBy": changed_by or subject.id,
             "reason": f"Human verification: {verification_status}. {reasoning}",
         }
     )
@@ -222,19 +228,22 @@ async def verify_task(
 async def assign_task(
     task_id: UUID,
     assignee_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
-    changed_by: str = "api_user",
+    changed_by: Optional[str] = None,
 ):
     """Assign a task to a user."""
-    task = await db.task.find_unique(where={"id": str(task_id)})
+    task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found",
         )
     
-    # Verify assignee exists
-    assignee = await db.user.find_unique(where={"id": str(assignee_id)})
+    # Verify assignee exists within the same tenant
+    assignee = await db.user.find_first(
+        where={"id": str(assignee_id), "tenantId": subject.tenant_id}
+    )
     if not assignee:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -255,7 +264,7 @@ async def assign_task(
             "taskId": str(task_id),
             "previousStatus": task.status,
             "newStatus": TaskStatus.ASSIGNED,
-            "changedBy": changed_by,
+            "changedBy": changed_by or subject.id,
             "reason": f"Assigned to {assignee.fullName} ({assignee.email})",
         }
     )
@@ -267,11 +276,12 @@ async def assign_task(
 async def dismiss_task(
     task_id: UUID,
     reason: str = "",
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
-    changed_by: str = "api_user",
+    changed_by: Optional[str] = None,
 ):
     """Dismiss a task."""
-    task = await db.task.find_unique(where={"id": str(task_id)})
+    task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -288,7 +298,7 @@ async def dismiss_task(
             "taskId": str(task_id),
             "previousStatus": task.status,
             "newStatus": TaskStatus.DISMISSED,
-            "changedBy": changed_by,
+            "changedBy": changed_by or subject.id,
             "reason": f"Dismissed: {reason}",
         }
     )
@@ -300,13 +310,14 @@ async def dismiss_task(
 async def bulk_update_tasks(
     task_ids: List[UUID],
     task_data: TaskUpdate,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
-    changed_by: str = "api_user",
+    changed_by: Optional[str] = None,
 ):
     """Bulk update multiple tasks."""
     results = []
     for task_id in task_ids:
-        task = await db.task.find_unique(where={"id": str(task_id)})
+        task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
         if not task:
             continue
         
@@ -322,7 +333,7 @@ async def bulk_update_tasks(
                     "taskId": str(task_id),
                     "previousStatus": task.status,
                     "newStatus": new_status,
-                    "changedBy": str(changed_by),
+                    "changedBy": changed_by or subject.id,
                     "reason": update_data.get("reason", "Bulk update"),
                 }
             )
@@ -339,10 +350,11 @@ async def bulk_update_tasks(
 @router.get("/{task_id}/audit-log", response_model=List[TaskAuditLog])
 async def get_task_audit_log(
     task_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get audit log for a task."""
-    task = await db.task.find_unique(where={"id": str(task_id)})
+    task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -362,6 +374,7 @@ async def get_task_source_quote(
     task_id: UUID,
     word_start: int,
     word_end: int,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Get the source transcript span for a task."""
@@ -404,17 +417,20 @@ async def get_task_source_quote(
 async def sync_task_to_integration(
     task_id: UUID,
     integration_id: UUID,
+    subject: Subject = Depends(get_current_subject),
     db=Depends(get_db),
 ):
     """Sync a task to an external integration."""
-    task = await db.task.find_unique(where={"id": str(task_id)})
+    task = await db.task.find_first(where={"id": str(task_id), "tenantId": subject.tenant_id})
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found",
         )
     
-    integration = await db.integration.find_unique(where={"id": str(integration_id)})
+    integration = await db.integration.find_first(
+        where={"id": str(integration_id), "tenantId": subject.tenant_id}
+    )
     if not integration:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

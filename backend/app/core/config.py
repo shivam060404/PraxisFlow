@@ -56,6 +56,20 @@ class Settings(BaseSettings):
     # Clerk
     CLERK_PUBLISHABLE_KEY: Optional[str] = None
     CLERK_SECRET_KEY: Optional[str] = None
+    CLERK_ISSUER: Optional[str] = None      # e.g. https://your-app.clerk.accounts.dev
+    CLERK_JWKS_URL: Optional[str] = None    # override when JWKS lives elsewhere
+
+    def validate_security_settings(self) -> None:
+        """Fail fast on insecure production configuration."""
+        import os as _os
+        if self.ENVIRONMENT.lower() in {'production', 'prod'}:
+            if not self.JWT_SECRET or self.JWT_SECRET == 'dev_secret_change_in_production':
+                raise ValueError('JWT_SECRET must be a strong unique value in production')
+            if not self.CLERK_SECRET_KEY:
+                import logging
+                logging.getLogger(__name__).warning(
+                    'Production without Clerk configured: falling back to local HS256 auth'
+                )
 
     # Langfuse
     LANGFUSE_PUBLIC_KEY: Optional[str] = None

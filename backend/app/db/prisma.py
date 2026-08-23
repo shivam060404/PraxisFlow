@@ -79,10 +79,23 @@ async def get_db() -> AsyncGenerator[Prisma, None]:
         yield db
 
 
-# RLS Helper
+# RLS Helpers
+# NOTE: parameterized — tenant_id is never interpolated into SQL. Callers must
+# still treat these as no-ops until RLS policies exist on the Prisma-managed
+# tables (see middleware note on application-layer isolation).
+
+import re as _re
+
+_UUID_RE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", _re.IGNORECASE
+)
+
+
 async def set_tenant_context(db: Prisma, tenant_id: str) -> None:
-    """Set PostgreSQL RLS context for the current tenant."""
-    await db.execute_raw(f"SELECT set_current_tenant('{tenant_id}')")
+    """Set PostgreSQL RLS context for the current tenant (parameterized)."""
+    if not _UUID_RE.match(tenant_id or ""):
+        raise ValueError("tenant_id must be a UUID")
+    await db.execute_raw("SELECT set_current_tenant($1)", tenant_id)
 
 
 async def clear_tenant_context(db: Prisma) -> None:
