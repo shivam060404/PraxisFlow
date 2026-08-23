@@ -1,0 +1,70 @@
+{
+  "_meta": {
+    "description": "EU AI Act Art. 11 technical documentation (model cards) for models used by PraxisFlow.",
+    "note": "Performance metrics are intentionally absent until benchmarked against this deployment's own evaluation suite. Do not add vendor-claimed numbers as if they were measured here.",
+    "last_reviewed": "2026-08-23"
+  },
+  "models": [
+    {
+      "name": "llama-3.3-70b-versatile",
+      "provider": "Groq",
+      "type": "LLM",
+      "purpose": "Primary task extraction, verification, entity resolution",
+      "limitations": "May hallucinate; knowledge cutoff applies. Mitigated via grounded verification and HITL review.",
+      "intended_use": "Meeting transcript analysis",
+      "not_intended_for": "Medical, legal, financial advice",
+      "data_governance": "Groq API: no training on customer data per provider terms",
+      "human_oversight": "HITL verification for confidence < 0.9",
+      "performance_metrics": {"measured": false, "note": "Pending internal eval harness run"}
+    },
+    {
+      "name": "gpt-4o",
+      "provider": "OpenAI",
+      "type": "LLM",
+      "purpose": "Verification judge, fallback extraction",
+      "limitations": "May hallucinate; knowledge cutoff applies.",
+      "intended_use": "High-stakes verification",
+      "not_intended_for": "Autonomous actions without review",
+      "data_governance": "OpenAI API data controls configured by deployment operator",
+      "human_oversight": "Primary verifier, HITL for disputes",
+      "performance_metrics": {"measured": false, "note": "Pending internal eval harness run"}
+    },
+    {
+      "name": "claude-sonnet-4-20250514",
+      "provider": "Anthropic",
+      "type": "LLM",
+      "purpose": "Fallback extraction and verification",
+      "limitations": "May refuse valid requests.",
+      "intended_use": "Backup extraction and verification",
+      "not_intended_for": "Real-time critical decisions",
+      "data_governance": "Anthropic API data controls configured by deployment operator",
+      "human_oversight": "Fallback only, HITL for disputes",
+      "performance_metrics": {"measured": false, "note": "Pending internal eval harness run"}
+    },
+    {
+      "name": "text-embedding-3-large",
+      "provider": "OpenAI",
+      "type": "Embedding",
+      "purpose": "Semantic search, deduplication, semantic cache",
+      "dimensions": 3072,
+      "limitations": "English-optimized; may miss multilingual nuance",
+      "intended_use": "Vector similarity for meeting content",
+      "not_intended_for": "Classification, generation",
+      "data_governance": "Embeddings derived from redacted transcripts only",
+      "human_oversight": "n/a (non-generative)",
+      "performance_metrics": {"measured": false, "note": "Retrieval quality pending eval"}
+    },
+    {
+      "name": "deepgram-nova-2",
+      "provider": "Deepgram",
+      "type": "ASR",
+      "purpose": "Speech-to-text with speaker diarization",
+      "limitations": "Accuracy degrades on heavy accents, crosstalk, low-quality audio",
+      "intended_use": "Meeting audio transcription",
+      "not_intended_for": "Surveillance or speaker identification",
+      "data_governance": "Audio processed transiently for transcription; not retained by Deepgram per provider terms",
+      "human_oversight": "Transcript editable before downstream processing",
+      "performance_metrics": {"measured": false, "note": "WER pending internal measurement"}
+    }
+  ]
+}

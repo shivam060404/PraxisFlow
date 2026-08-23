@@ -1,6 +1,7 @@
 from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -254,42 +255,91 @@ def verify_task(self, task_id: str):
 
 
 async def _verify_task_async(task_id: str):
-    """Async task verification."""
+    """Ground the extracted task against its meeting transcript.
+
+    Uses the guardrails HallucinationDetector (keyword-overlap faithfulness
+    heuristic) to decide VERIFIED vs NEEDS_REVIEW. Tasks that fail grounding
+    are never silently auto-approved.
+    """
     db = await get_prisma()
-    
+
     task = await db.task.find_unique(
         where={"id": task_id},
         include={"meeting": {"include": {"transcript": True}}},
     )
-    
+
     if not task:
         raise ValueError(f"Task not found: {task_id}")
-    
-    # TODO: Implement verification agent
-    # For now, mark as verified
-    
+
+    transcript = (
+        task.meeting.transcript.fullText
+        if task.meeting and task.meeting.transcript
+        else None
+    )
+
+    verification_status = "NEEDS_REVIEW"
+    new_status = "PENDING_REVIEW"
+    reasoning = "No transcript available for grounding check; routed to human review."
+
+    if transcript:
+        from app.guardrails.output_guardrails import HallucinationDetector
+        from app.guardrails.base import GuardrailAction, GuardrailContext
+
+        detector = HallucinationDetector(enabled=True, faithfulness_threshold=0.7)
+        context = GuardrailContext(tenant_id=task.tenantId, user_id="system", meeting_id=task.meetingId)
+        context.transcript_context = transcript
+
+        output = json.dumps({
+            "tasks": [{
+                "title": task.title,
+                "description": task.description,
+                "source_quote": task.sourceQuote,
+            }]
+        })
+        result = await detector.check(output, context)
+
+        metadata = result.metadata or {}
+        faithfulness = metadata.get("faithfulness_score")
+        hallucination = metadata.get("hallucination_score")
+
+        if result.action == GuardrailAction.ALLOW:
+            verification_status = "VERIFIED"
+            new_status = "VERIFIED"
+            reasoning = (
+                f"Grounding check passed "
+                f"(faithfulness={faithfulness:.2f}, hallucination={hallucination:.2f}). "
+                f"Quote supported by transcript."
+            )
+        else:
+            reasoning = (
+                f"Grounding check failed ({result.message}); "
+                f"faithfulness={faithfulness}, hallucination={hallucination}. "
+                f"Routed to human review."
+            )
+
     await db.task.update(
         where={"id": task_id},
         data={
-            "verificationStatus": "VERIFIED",
-            "verificationReasoning": "Auto-verified (placeholder)",
-            "status": "VERIFIED",
+            "verificationStatus": verification_status,
+            "verificationReasoning": reasoning,
+            "status": new_status,
         },
     )
-    
+
     # Create audit log
     await db.taskauditlog.create(
         data={
             "taskId": task_id,
-            "previousStatus": "EXTRACTED",
-            "newStatus": "VERIFIED",
+            "previousStatus": task.status,
+            "newStatus": new_status,
             "changedBy": "verification_agent",
-            "reason": "Passed verification",
+            "reason": reasoning,
         }
     )
-    
-    # Trigger entity resolution
-    resolve_assignee.delay(task_id)
+
+    # Only resolve assignees for verified tasks
+    if verification_status == "VERIFIED":
+        resolve_assignee.delay(task_id)
     
     return {"verified": True, "task_id": task_id}
 
@@ -417,7 +467,7 @@ def sync_task_to_integrations(self, task_id: str):
             raise
 
 
-async def _sync_task_async(task_id: str):
+async def _sync_task_async(task_id: str, integration_id: str = None):
     """Async integration sync using adapter pattern."""
     db = await get_prisma()
     
@@ -429,9 +479,15 @@ async def _sync_task_async(task_id: str):
     if not task:
         raise ValueError(f"Task not found: {task_id}")
     
-    # Get active integrations for tenant
+    # Get active integrations for tenant (optionally scoped to one)
+    integration_where = {
+        "tenantId": task.tenantId,
+        "status": "ACTIVE",
+    }
+    if integration_id:
+        integration_where["id"] = integration_id
     integrations = await db.integration.find_many(
-        where={"tenantId": task.tenantId, "status": "ACTIVE"},
+        where=integration_where,
     )
     
     if not integrations:
@@ -509,14 +565,26 @@ async def _mark_sync_failed(task_id: str, error: str):
 
 
 @shared_task
-def retry_failed_sync(task_id: str, integration_id: str):
-    """Retry a failed sync."""
-    return asyncio.run(_sync_task_async(task_id))
+def retry_failed_sync(task_id: str, integration_id: str = None):
+    """Retry a failed sync, optionally scoped to one integration."""
+    return asyncio.run(_sync_task_async(task_id, integration_id))
 
 
 @shared_task
 def cleanup_old_data():
-    """Periodic cleanup task."""
-    logger.info("Running periodic cleanup")
-    # TODO: Implement cleanup of old transcripts, audit logs, etc.
-    return {"status": "completed"}
+    """Prune audit data past the retention window (default 7 years)."""
+    from datetime import datetime, timedelta
+
+    async def _cleanup():
+        db = await get_prisma()
+        cutoff = datetime.utcnow() - timedelta(
+            days=getattr(settings, "AUDIT_RETENTION_DAYS", 2555)
+        )
+        logs = await db.taskauditlog.delete_many(where={"createdAt": {"lt": cutoff}})
+        ai_logs = await db.aiauditlog.delete_many(where={"createdAt": {"lt": cutoff}})
+        logger.info(f"Cleanup removed {logs} task audit logs, {ai_logs} AI audit logs")
+        return {"taskAuditLogsDeleted": logs, "aiAuditLogsDeleted": ai_logs}
+
+    result = run_async(_cleanup())
+    logger.info("Periodic cleanup completed")
+    return result

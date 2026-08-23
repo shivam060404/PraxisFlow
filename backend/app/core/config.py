@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: Optional[str] = None
     LANGFUSE_SECRET_KEY: Optional[str] = None
     LANGFUSE_HOST: str = "http://localhost:3000"
+    LLM_GATEWAY_URL: Optional[str] = None  # LiteLLM proxy; unset = not deployed
 
     # Deepgram Options
     DEEPGRAM_MODEL: str = "nova-2"
@@ -69,6 +70,12 @@ class Settings(BaseSettings):
     DEEPGRAM_UTTERANCES: bool = True
     DEEPGRAM_PUNCTUATE: bool = True
     DEEPGRAM_PARAGRAPHS: bool = True
+
+    # GDPR: redact PII from transcripts before persistence and LLM calls
+    PII_REDACTION_ENABLED: bool = True
+
+    # Retention window for audit logs (EU AI Act Art. 19 / GDPR)
+    AUDIT_RETENTION_DAYS: int = 2555  # 7 years
 
     # LLM Settings
     EXTRACTION_MODEL: str = "groq/llama-3.3-70b-versatile"

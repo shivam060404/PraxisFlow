@@ -11,27 +11,18 @@ router = APIRouter(prefix="/metrics", tags=["Metrics"])
 async def get_metrics(
     db=Depends(get_db),
 ):
-    """Get team accountability metrics."""
-    # Get basic counts
+    """
+    Team accountability metrics — computed live from the database.
+    Every figure here is a real aggregate; nothing is hardcoded.
+    """
     total_meetings = await db.meeting.count()
     total_tasks = await db.task.count()
-    
-    # Verification rate
+
+    # Verification funnel
     verified_tasks = await db.task.count(where={"verificationStatus": "VERIFIED"})
     verification_rate = round((verified_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
-    
-    # Avg time to sync (mock for now)
-    avg_time_to_sync = 12
-    
-    # Accuracy by week (mock data)
-    accuracy_by_week = [
-        {"week": "Week 1", "precision": 0.72, "recall": 0.68, "f1": 0.70},
-        {"week": "Week 2", "precision": 0.75, "recall": 0.71, "f1": 0.73},
-        {"week": "Week 3", "precision": 0.78, "recall": 0.74, "f1": 0.76},
-        {"week": "Week 4", "precision": 0.81, "recall": 0.77, "f1": 0.79},
-    ]
-    
-    # Funnel data
+
+    # Funnel data (real status counts)
     funnel_data = [
         {"stage": "Extracted", "count": await db.task.count(where={"status": "EXTRACTED"})},
         {"stage": "Verified", "count": await db.task.count(where={"status": "VERIFIED"})},
@@ -39,16 +30,92 @@ async def get_metrics(
         {"stage": "Synced", "count": await db.task.count(where={"status": "SYNCED"})},
         {"stage": "Completed", "count": await db.task.count(where={"status": "COMPLETED"})},
     ]
-    
-    # Team performance (mock data)
-    team_performance = [
-        {"teamMember": "Sarah Chen", "meetingsAttended": 24, "tasksAssigned": 45, "tasksCompleted": 38, "avgCompletionTime": 2.3, "overdueRate": 5},
-        {"teamMember": "Mike Johnson", "meetingsAttended": 18, "tasksAssigned": 32, "tasksCompleted": 25, "avgCompletionTime": 3.1, "overdueRate": 12},
-        {"teamMember": "Emily Davis", "meetingsAttended": 31, "tasksAssigned": 58, "tasksCompleted": 52, "avgCompletionTime": 1.8, "overdueRate": 3},
-        {"teamMember": "James Wilson", "meetingsAttended": 15, "tasksAssigned": 28, "tasksCompleted": 19, "avgCompletionTime": 4.2, "overdueRate": 25},
-        {"teamMember": "Lisa Anderson", "meetingsAttended": 22, "tasksAssigned": 41, "tasksCompleted": 35, "avgCompletionTime": 2.7, "overdueRate": 8},
+
+    # Avg time-to-sync: mean latency between task creation and first external
+    # sync for tasks that have been synced (null until real syncs exist).
+    synced_tasks = await db.task.find_many(
+        where={
+            "status": {"in": ["SYNCED", "COMPLETED"]},
+            "lastSyncedAt": {"not": None},
+        },
+        select={"createdAt": True, "lastSyncedAt": True},
+        take=500,
+        order={"createdAt": "desc"},
+    )
+    sync_durations = [
+        (t.lastSyncedAt - t.createdAt).total_seconds() / 3600
+        for t in synced_tasks
+        if t.lastSyncedAt and t.lastSyncedAt > t.createdAt
     ]
-    
+    avg_time_to_sync = round(sum(sync_durations) / len(sync_durations), 1) if sync_durations else None
+
+    # Extraction accuracy trend by week: share of tasks created that week that
+    # passed verification. Precision proxy = verified / (verified + dismissed).
+    accuracy_by_week = []
+    now = datetime.utcnow()
+    for weeks_back in range(3, -1, -1):
+        week_start = now - timedelta(weeks=weeks_back + 1)
+        week_end = now - timedelta(weeks=weeks_back)
+        created = await db.task.count(
+            where={"createdAt": {"gte": week_start, "lt": week_end}}
+        )
+        verified_wk = await db.task.count(
+            where={
+                "createdAt": {"gte": week_start, "lt": week_end},
+                "verificationStatus": "VERIFIED",
+            }
+        )
+        dismissed_wk = await db.task.count(
+            where={
+                "createdAt": {"gte": week_start, "lt": week_end},
+                "status": "DISMISSED",
+            }
+        )
+        denom = verified_wk + dismissed_wk
+        precision = round(verified_wk / denom, 2) if denom else 0.0
+        recall_proxy = round(verified_wk / created, 2) if created else 0.0
+        f1 = (
+            round(2 * precision * recall_proxy / (precision + recall_proxy), 2)
+            if (precision + recall_proxy) else 0.0
+        )
+        accuracy_by_week.append({
+            "week": f"Week -{weeks_back}" if weeks_back else "This week",
+            "tasks_created": created,
+            "verified": verified_wk,
+            "precision": precision,
+            "recall": recall_proxy,
+            "f1": f1,
+        })
+
+    # Team performance: per-user real counts from assigned tasks.
+    users = await db.user.find_many(
+        select={"id": True, "fullName": True},
+        take=100,
+    )
+    team_performance = []
+    for user in users:
+        assigned = await db.task.count(where={"assigneeId": user.id})
+        completed = await db.task.count(
+            where={"assigneeId": user.id, "status": "COMPLETED"}
+        )
+        overdue = await db.task.count(
+            where={
+                "assigneeId": user.id,
+                "deadlineDate": {"lt": now},
+                "status": {"notIn": ["COMPLETED", "DISMISSED"]},
+            }
+        )
+        meetings_attended = await db.attendee.count(where={"userId": user.id})
+        team_performance.append({
+            "teamMember": user.fullName,
+            "meetingsAttended": meetings_attended,
+            "tasksAssigned": assigned,
+            "tasksCompleted": completed,
+            "overdueRate": round(overdue / assigned * 100) if assigned else 0,
+        })
+    # Only include members with actual assignments
+    team_performance = [m for m in team_performance if m["tasksAssigned"] > 0]
+
     return {
         "totalMeetings": total_meetings,
         "totalTasksExtracted": total_tasks,

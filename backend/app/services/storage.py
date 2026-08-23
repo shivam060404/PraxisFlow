@@ -38,13 +38,19 @@ class StorageService:
         file: BinaryIO,
         content_type: str,
     ) -> str:
-        """Upload a file to MinIO and return the URL."""
+        """
+        Upload a file to MinIO and return a DURABLE object reference
+        ("{bucket}/{object_name}"), never a presigned URL — presigned URLs
+        expire and would break reprocessing.
+        Use ``get_presigned_url`` / ``resolve_audio_bytes`` when transient
+        access is needed.
+        """
         try:
             # Get file size
             file.seek(0, 2)  # Seek to end
             file_size = file.tell()
             file.seek(0)  # Reset to beginning
-            
+
             self.client.put_object(
                 bucket_name=bucket,
                 object_name=object_name,
@@ -52,14 +58,30 @@ class StorageService:
                 length=file_size,
                 content_type=content_type,
             )
-            
-            # Return presigned URL (valid for 7 days)
-            url = self.client.presigned_get_object(bucket, object_name)
-            return url
-            
+
+            return f"{bucket}/{object_name}"
+
         except S3Error as e:
             logger.error(f"MinIO upload error: {e}")
             raise
+
+    async def resolve_audio_bytes(self, reference: str) -> bytes:
+        """
+        Load audio bytes from either a durable "bucket/object" reference or a
+        legacy http(s) URL (rows created before durable refs existed).
+        """
+        if reference.startswith("http://") or reference.startswith("https://"):
+            import httpx
+
+            async with httpx.AsyncClient(timeout=120) as http_client:
+                resp = await http_client.get(reference)
+                resp.raise_for_status()
+                return resp.content
+
+        parts = reference.split("/", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid storage reference: {reference}")
+        return await self.download_file(parts[0], parts[1])
     
     async def upload_bytes(
         self,

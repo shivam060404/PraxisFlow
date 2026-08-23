@@ -9,7 +9,8 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Dict, Any, Optional, Set
 
-from fastapi import Request, Response, HTTPException, status
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from redis.asyncio import Redis
@@ -165,11 +166,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         user_id = getattr(request.state, "user_id", "anonymous")
         endpoint = request.url.path
 
-        # Check rate limits
-        await self._check_rate_limit("ip", client_ip, self.config.requests_per_minute, 60)
-        await self._check_rate_limit("tenant", tenant_id, self.config.requests_per_minute * 10, 60)
-        await self._check_rate_limit("user", user_id, self.config.requests_per_minute * 5, 60)
-        await self._check_rate_limit("endpoint", f"{tenant_id}:{endpoint}", self.config.requests_per_minute, 60)
+        # Check rate limits. A violation must be answered with a real 429
+        # response here — HTTPException raised inside BaseHTTPMiddleware is
+        # NOT caught by the app's exception handlers and surfaces as a 500.
+        for namespace, identifier, limit in (
+            ("ip", client_ip, self.config.requests_per_minute),
+            ("tenant", tenant_id, self.config.requests_per_minute * 10),
+            ("user", user_id, self.config.requests_per_minute * 5),
+            ("endpoint", f"{tenant_id}:{endpoint}", self.config.requests_per_minute),
+        ):
+            retry_after = await self._check_rate_limit(
+                namespace, identifier, limit, 60
+            )
+            if retry_after is not None:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "Rate limit exceeded",
+                        "namespace": namespace,
+                        "limit": limit,
+                        "retry_after": retry_after,
+                    },
+                    headers={"Retry-After": str(retry_after)},
+                )
 
         # Add rate limit headers
         response = await call_next(request)
@@ -192,18 +211,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             await redis.expire(key, window_seconds)
 
         if current > limit:
-            ttl = await redis.ttl(key)
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={
-                    "error": "Rate limit exceeded",
-                    "namespace": namespace,
-                    "limit": limit,
-                    "window_seconds": window_seconds,
-                    "retry_after": ttl,
-                },
-                headers={"Retry-After": str(ttl)},
-            )
+            return max(await redis.ttl(key), 1)
+        return None
 
 
 # ─── Security Headers Middleware ───

@@ -67,13 +67,12 @@ class DeepgramASRService:
         logger.info(f"Starting transcription for meeting {meeting_id}")
         
         try:
-            import httpx
-            # Download audio locally since Deepgram cannot access localhost URLs
-            logger.info(f"Downloading audio from {audio_url}")
-            async with httpx.AsyncClient() as http_client:
-                audio_resp = await http_client.get(audio_url)
-                audio_resp.raise_for_status()
-                audio_bytes = audio_resp.content
+            # Load audio bytes via the storage service — handles durable
+            # "bucket/object" references and legacy presigned URLs alike.
+            logger.info(f"Loading audio from storage: {audio_url[:120]}")
+            from app.services.storage import storage_service
+
+            audio_bytes = await storage_service.resolve_audio_bytes(audio_url)
 
             # Call Deepgram API with file buffer
             logger.info(f"Sending audio buffer to Deepgram...")
@@ -155,12 +154,12 @@ class DeepgramASRService:
                         for w in utt.words
                     ] if hasattr(utt, 'words') and utt.words else [],
                 })
-        
+
         # Calculate metadata
         word_count = len(words)
         duration_ms = int(words[-1]["end"] * 1000) if words else 0
-        
-        return TranscriptResult(
+
+        result = TranscriptResult(
             id=str(uuid.uuid4()),
             meeting_id=meeting_id,
             tenant_id=tenant_id,
@@ -171,6 +170,73 @@ class DeepgramASRService:
             utterances=utterances,
             words=words,
         )
+
+        # GDPR: redact PII before anything is stored or sent to an LLM.
+        # Extraction, verification and source quotes then operate on (and
+        # match) the redacted text consistently.
+        self._apply_pii_redaction(result)
+
+        return result
+
+    def _apply_pii_redaction(self, transcript: "TranscriptResult") -> None:
+        """Redact PII from transcript text when enabled. Never blocks ingestion."""
+        if not getattr(settings, "PII_REDACTION_ENABLED", True):
+            return
+
+        try:
+            from app.services.pii_redaction import redact_text as _redact_text
+
+            redacted_any = False
+            for utt in transcript.utterances:
+                outcome = _redact_text(utt.get("text", ""))
+                if outcome.get("has_redactions"):
+                    new_text = outcome["text"]
+                    old_words = utt.get("words") or []
+                    utt["text"] = new_text
+                    utt["words"] = self._rebuild_word_timings(
+                        new_text, utt.get("start", 0.0), utt.get("end", 0.0), old_words
+                    )
+                    redacted_any = True
+
+            if redacted_any:
+                transcript.full_text = " ".join(
+                    u["text"] for u in transcript.utterances
+                ) if transcript.utterances else transcript.full_text
+                transcript.word_count = len(transcript.full_text.split())
+                transcript.redaction_applied = True
+                logger.info(
+                    f"PII redaction applied to transcript {transcript.id}"
+                )
+        except ImportError as e:
+            logger.warning(f"PII redaction unavailable ({e}); storing unredacted")
+        except Exception as e:
+            logger.warning(f"PII redaction failed ({e}); storing unredacted")
+
+    @staticmethod
+    def _rebuild_word_timings(
+        text: str, start_s: float, end_s: float, old_words: list
+    ) -> list:
+        """
+        Rebuild word-level timings after redaction changed the text.
+        Timestamps are interpolated linearly across the utterance duration;
+        original confidences are reused where available.
+        """
+        tokens = text.split()
+        if not tokens:
+            return []
+
+        span = max(end_s - start_s, 0.0)
+        step = span / len(tokens)
+        rebuilt = []
+        for i, token in enumerate(tokens):
+            w_start = start_s + i * step
+            w_end = w_start + step
+            confidence = old_words[i]["confidence"] if i < len(old_words) else None
+            entry = {"word": token, "start": round(w_start, 3), "end": round(w_end, 3)}
+            if confidence is not None:
+                entry["confidence"] = confidence
+            rebuilt.append(entry)
+        return rebuilt
     
     async def _persist_transcript(self, transcript: TranscriptResult):
         """Save transcript to database."""

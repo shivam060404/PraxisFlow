@@ -406,25 +406,55 @@ async def get_eu_ai_act_status(
     subject: Subject = Depends(get_current_subject),
     _: None = Depends(require_permission(Permission.COMPLIANCE_EXPORT)),
 ):
-    """Get EU AI Act compliance status."""
+    """
+    EU AI Act readiness computed from verifiable system state.
+
+    Each flag reflects an implemented control (code or shipped documentation):
+      - record_keeping: AI audit log entries exist for this tenant (Art. 12)
+      - human_oversight: HITL verification workflow is wired (Art. 14)
+      - technical_documentation: model cards + architecture docs shipped (Art. 11)
+    Formal conformity assessment (Art. 43) has NOT been performed — the
+    overall_compliant flag therefore stays False until external assessment.
+    """
     db = await get_prisma()
-    
-    # Check various compliance requirements
-    # In production, these would be actual checks
-    
-    return EuAiActComplianceStatus(
-        risk_management_system=True,      # Art. 9 - Risk register implemented
-        data_governance=True,             # Art. 10 - DPIA, DPA, consent mgmt
-        technical_documentation=True,     # Art. 11 - Architecture docs, model cards
-        record_keeping=True,              # Art. 12 - Immutable AI audit logs
-        transparency=True,                # Art. 13 - User-facing AI disclosure
-        human_oversight=True,             # Art. 14 - HITL verification
-        accuracy_robustness=True,         # Art. 15 - Continuous evals, drift detection
-        cybersecurity=True,               # Art. 15 - Pen testing, vulnerability mgmt
-        overall_compliant=True,
-        last_assessment=datetime.utcnow() - timedelta(days=30),
-        next_assessment=datetime.utcnow() + timedelta(days=60),
+
+    ai_audit_logs = await db.aiauditlog.count(where={"tenantId": subject.tenant_id})
+    reviewed_tasks = await db.task.count(
+        where={
+            "tenantId": subject.tenant_id,
+            "verificationStatus": {"in": ["VERIFIED", "NEEDS_REVIEW"]},
+        }
     )
+
+    record_keeping = ai_audit_logs > 0
+    human_oversight_in_use = reviewed_tasks > 0
+
+    # Documentation exists (ARCHITECTURE.md, COMPLIANCE.md, model cards file)
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[2]
+    docs_ok = all(
+        (backend_root / rel).exists()
+        for rel in ["docs/COMPLIANCE.md", "ARCHITECTURE.md", "backend/config/model_cards.json"]
+    )
+
+    return EuAiActComplianceStatus(
+        risk_management_system=bool(docs_ok),       # risk register in COMPLIANCE.md
+        data_governance=True,                        # PII redaction pre-LLM implemented
+        technical_documentation=bool(docs_ok),       # Art. 11 artifacts present
+        record_keeping=record_keeping,
+        transparency=True,                           # AI-disclosure in product UI/docs
+        human_oversight=human_oversight_in_use or True,  # workflow present even if unused yet
+        accuracy_robustness=False,                   # continuous evals not yet running
+        cybersecurity=False,                         # no pen test performed
+        overall_compliant=False,                     # requires formal conformity assessment
+        last_assessment=now_utc(),
+        next_assessment=now_utc() + timedelta(days=90),
+    )
+
+
+def now_utc() -> datetime:
+    return datetime.utcnow()
 
 
 @router.get("/gdpr", response_model=GdprComplianceStatus)
@@ -432,114 +462,44 @@ async def get_gdpr_status(
     subject: Subject = Depends(get_current_subject),
     _: None = Depends(require_permission(Permission.COMPLIANCE_EXPORT)),
 ):
-    """Get GDPR compliance status."""
-    db = await get_prisma()
-    
+    """GDPR readiness computed from implemented capabilities."""
+    pii_enabled = getattr(settings, "PII_REDACTION_ENABLED", False)
+
     return GdprComplianceStatus(
-        lawful_basis_documented=True,
-        dpia_completed=True,
-        dpia_last_reviewed=datetime.utcnow() - timedelta(days=90),
-        data_processing_agreements=True,
-        dpa_last_reviewed=datetime.utcnow() - timedelta(days=180),
-        data_subject_rights_process=True,
-        breach_notification_process=True,
-        data_retention_policy=True,
-        cross_border_transfers=True,
-        sccs_in_place=True,
-        overall_compliant=True,
+        lawful_basis_documented=True,            # documented in COMPLIANCE.md
+        dpia_completed=False,                    # DPIA not yet produced
+        dpia_last_reviewed=None,
+        data_processing_agreements=False,        # DPAs are an org-level action, not code
+        dpa_last_reviewed=None,
+        data_subject_rights_process=True,        # DSR endpoints implemented + backed by DB
+        breach_notification_process=False,       # notification workflow not implemented
+        data_retention_policy=False,             # retention job not scheduled yet
+        cross_border_transfers=False,            # no transfer mechanism configured
+        sccs_in_place=False,
+        overall_compliant=pii_enabled and False, # cannot claim compliance without DPIA/DPA
     )
 
-
-# ─── Model Cards (EU AI Act Art. 11) ───
 
 @router.get("/model-cards")
 async def get_model_cards(
     subject: Subject = Depends(get_current_subject),
     _: None = Depends(require_permission(Permission.COMPLIANCE_EXPORT)),
 ):
-    """Get model cards for all AI models used (EU AI Act Art. 11)."""
-    return {
-        "models": [
-            {
-                "name": "llama-3.3-70b-versatile",
-                "provider": "Groq",
-                "type": "LLM",
-                "purpose": "Task extraction, verification, entity resolution",
-                "version": "2025-01",
-                "training_data": "Public web data, instruction tuning",
-                "limitations": "May hallucinate, knowledge cutoff 2024",
-                "intended_use": "Meeting transcript analysis",
-                "not_intended_for": "Medical, legal, financial advice",
-                "performance_metrics": {
-                    "faithfulness": 0.87,
-                    "hallucination_rate": 0.02,
-                    "latency_p99_ms": 3500,
-                },
-                "data_governance": "No training on customer data",
-                "human_oversight": "HITL verification for confidence < 0.9",
-                "last_updated": "2025-07-15",
-            },
-            {
-                "name": "gpt-4o",
-                "provider": "OpenAI",
-                "type": "LLM",
-                "purpose": "Verification, fallback extraction",
-                "version": "2024-08-06",
-                "training_data": "Public web data, instruction tuning",
-                "limitations": "May hallucinate, knowledge cutoff 2024",
-                "intended_use": "High-stakes verification",
-                "not_intended_for": "Medical, legal, financial advice",
-                "performance_metrics": {
-                    "faithfulness": 0.91,
-                    "hallucination_rate": 0.01,
-                    "latency_p99_ms": 5000,
-                },
-                "data_governance": "No training on customer data (opted out)",
-                "human_oversight": "Primary verifier, HITL for disputes",
-                "last_updated": "2025-07-15",
-            },
-            {
-                "name": "claude-sonnet-4-20250514",
-                "provider": "Anthropic",
-                "type": "LLM",
-                "purpose": "Fallback extraction, verification",
-                "version": "2025-05",
-                "training_data": "Public web data, constitutional AI",
-                "limitations": "May refuse valid requests, knowledge cutoff",
-                "intended_use": "Backup extraction and verification",
-                "not_intended_for": "Real-time critical decisions",
-                "performance_metrics": {
-                    "faithfulness": 0.89,
-                    "hallucination_rate": 0.015,
-                    "latency_p99_ms": 4500,
-                },
-                "data_governance": "No training on customer data",
-                "human_oversight": "Fallback only, HITL for disputes",
-                "last_updated": "2025-07-15",
-            },
-            {
-                "name": "text-embedding-3-large",
-                "provider": "OpenAI",
-                "type": "Embedding",
-                "purpose": "Semantic search, deduplication, caching",
-                "version": "2024-02",
-                "dimensions": 3072,
-                "limitations": "English-optimized, may miss multilingual nuance",
-                "intended_use": "Vector similarity for meeting content",
-                "not_intended_for": "Classification, generation",
-                "performance_metrics": {
-                    "mteb_retrieval": 0.72,
-                    "mteb_clustering": 0.68,
-                },
-                "data_governance": "No training on customer data",
-                "human_oversight": "Automated, monitored for drift",
-                "last_updated": "2025-07-15",
-            },
-        ],
-    }
+    """Model cards for all AI models used (EU AI Act Art. 11).
+
+    Served from config/model_cards.json — a versioned documentation artifact.
+    Performance metrics are omitted until measured against this deployment's
+    own evaluation suite.
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "config" / "model_cards.json"
+    with open(path) as f:
+        return json.load(f)
 
 
-# ─── Background Tasks ───
+
 
 async def _run_data_subject_request(request_id: str):
     """Process a data subject request based on type (background worker)."""

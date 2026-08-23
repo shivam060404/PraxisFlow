@@ -9,7 +9,7 @@ import os
 
 # Configuration
 API_URL = "http://localhost:8000/api/v1"
-JWT_SECRET = "dev_secret"  # from .env
+JWT_SECRET = os.environ.get("JWT_SECRET", "dev_secret_change_in_production")
 ALGORITHM = "HS256"
 
 # Create a deterministic tenant and user

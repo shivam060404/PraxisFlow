@@ -293,7 +293,7 @@ async def search_transcript(
                         "start_time_ms": utterance.start_time_ms,
                         "end_time_ms": utterance.end_time_ms,
                         "match_word_index": i,
-                        "context": utterance.text[max(0, i-5):i+5],
+                        "context": " ".join(words[max(0, i - 5): i + 6]),
                     })
                     break
         

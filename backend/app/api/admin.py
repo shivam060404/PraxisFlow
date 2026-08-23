@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Optional
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from uuid import UUID
 
@@ -440,43 +441,76 @@ async def get_audit_logs(
 async def get_compliance_status(
     current_user = Depends(require_permission(Permission.COMPLIANCE_EXPORT)),
 ):
-    """Get current compliance status for the tenant."""
+    """
+    Compliance posture computed from actual system state.
+
+    Only verifiable facts are reported. Formal certifications (SOC 2,
+    ISO 27001) require external audits and are reported as not_certified
+    until they exist — this endpoint will never fabricate credentials.
+    """
     db = await get_prisma()
-    
-    # Check various compliance aspects
-    # This would be more comprehensive in production
-    
+    now = datetime.utcnow()
+    thirty_days_ago = now - timedelta(days=30)
+
+    # Real GDPR signals
+    dsr_last_30d = await db.datasubjectrequest.count(
+        where={"tenantId": current_user.tenant_id, "createdAt": {"gte": thirty_days_ago}}
+    )
+    exports_total = await db.complianceexport.count(
+        where={"tenantId": current_user.tenant_id}
+    )
+
+    # Real EU AI Act signals
+    ai_audit_logs = await db.aiauditlog.count(
+        where={"tenantId": current_user.tenant_id}
+    )
+    tasks_needing_review = await db.task.count(
+        where={
+            "tenantId": current_user.tenant_id,
+            "verificationStatus": {"in": ["NEEDS_REVIEW", "PENDING"]},
+        }
+    )
+
+    pii_redaction_enabled = getattr(settings, "PII_REDACTION_ENABLED", False)
+
+    gdpr_gaps = []
+    if not pii_redaction_enabled:
+        gdpr_gaps.append("PII redaction is disabled")
+    if dsr_last_30d and not exports_total:
+        gdpr_gaps.append("DSRs exist but no export capability has been exercised")
+
+    eu_gaps = []
+    if ai_audit_logs == 0:
+        eu_gaps.append("No AI audit logs recorded yet (Art. 12 record-keeping)")
+    if tasks_needing_review == 0:
+        eu_gaps.append("Human-in-the-loop review has not processed any tasks yet")
+
     return {
-        "eu_ai_act": {
-            "status": "compliant",
-            "last_assessment": "2025-07-15",
-            "next_review": "2025-10-15",
-            "risk_level": "high",
-            "controls_implemented": 8,
-            "controls_total": 8,
-        },
         "gdpr": {
-            "status": "compliant",
-            "dpo_appointed": True,
-            "dpia_completed": True,
-            "dpa_signed": True,
-            "data_subject_requests_30d": 0,
-            "breach_notifications_30d": 0,
+            "pii_redaction_enabled": pii_redaction_enabled,
+            "data_subject_requests_30d": dsr_last_30d,
+            "compliance_exports_total": exports_total,
+            "erasure_capability": True,   # /compliance/erase-tenant implemented
+            "portability_capability": True,  # /compliance/export implemented
+            "gaps": gdpr_gaps,
+        },
+        "eu_ai_act": {
+            "ai_audit_log_entries": ai_audit_logs,
+            "tasks_pending_human_review": tasks_needing_review,
+            "hitl_workflow_present": True,   # verification + HITL resume endpoints
+            "model_cards_available": True,   # /compliance/model-cards
+            "formal_conformity_assessment": None,  # requires external audit
+            "gaps": eu_gaps,
         },
         "soc2": {
-            "status": "in_progress",
-            "type": "Type II",
-            "audit_period": "2025-01-01 to 2025-06-30",
-            "controls_tested": 45,
-            "controls_passed": 42,
-            "findings_open": 3,
+            "status": "not_certified",
+            "note": "SOC 2 Type II requires an independent CPA audit. No audit has been performed.",
         },
         "iso27001": {
-            "status": "certified",
-            "certificate_number": "ISO27001-2025-001234",
-            "valid_until": "2026-07-15",
-            "scope": "AI Meeting Intelligence Platform",
+            "status": "not_certified",
+            "note": "ISO 27001 certification requires an accredited external audit. None performed.",
         },
+        "generated_at": now.isoformat(),
     }
 
 
@@ -486,52 +520,73 @@ async def get_compliance_status(
 async def get_system_health(
     current_user = Depends(require_permission(Permission.TENANT_SETTINGS)),
 ):
-    """Get detailed health status of all system components."""
+    """Health of every infrastructure dependency, from configured settings."""
     import httpx
-    
-    health = {
-        "database": "unknown",
-        "redis": "unknown",
-        "kafka": "unknown",
-        "qdrant": "unknown",
-        "neo4j": "unknown",
-        "minio": "unknown",
-        "llm_gateway": "unknown",
-        "langfuse": "unknown",
-        "overall": "unknown",
-    }
-    
-    # Check each service
-    services = [
-        ("database", "http://localhost:8000/health"),
-        ("redis", "redis://redis:6379"),
-        ("qdrant", "http://qdrant:6333/healthz"),
-        ("llm_gateway", "http://llm-gateway:4000/health/liveliness"),
-        ("langfuse", "http://langfuse:3000/api/health"),
-    ]
-    
-    for name, url in services:
-        try:
-            if url.startswith("redis://"):
-                import redis.asyncio as redis
-                r = redis.from_url(url)
-                await r.ping()
-                health[name] = "healthy"
-            else:
-                async with httpx.AsyncClient(timeout=2.0) as client:
-                    resp = await client.get(url)
-                    health[name] = "healthy" if resp.status_code == 200 else "unhealthy"
-        except Exception:
-            health[name] = "unhealthy"
-    
-    # Overall status
-    if all(v == "healthy" for v in health.values() if v != "unknown"):
+
+    health = {}
+
+    # Database — real query round-trip
+    try:
+        db = await get_prisma()
+        await db.query_raw("SELECT 1")
+        health["database"] = "healthy"
+    except Exception:
+        health["database"] = "unhealthy"
+
+    # Redis
+    try:
+        import redis.asyncio as redis_lib
+
+        r = redis_lib.from_url(settings.REDIS_URL)
+        await r.ping()
+        health["redis"] = "healthy"
+    except Exception:
+        health["redis"] = "unhealthy"
+
+    # Qdrant
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{settings.QDRANT_URL.rstrip('/')}/healthz")
+            health["qdrant"] = "healthy" if resp.status_code == 200 else "unhealthy"
+    except Exception:
+        health["qdrant"] = "unhealthy"
+
+    # Neo4j
+    try:
+        from neo4j import GraphDatabase
+
+        driver = GraphDatabase.driver(
+            settings.NEO4J_URI,
+            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+        )
+        await asyncio.to_thread(driver.verify_connectivity)
+        driver.close()
+        health["neo4j"] = "healthy"
+    except Exception:
+        health["neo4j"] = "unhealthy"
+
+    # MinIO
+    try:
+        from app.services.storage import StorageService
+
+        storage = StorageService()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: storage.client.bucket_exists(settings.MINIO_BUCKET_AUDIO),
+        )
+        health["minio"] = "healthy"
+    except Exception:
+        health["minio"] = "unhealthy"
+
+    checks = [v for v in health.values()]
+    if all(v == "healthy" for v in checks):
         health["overall"] = "healthy"
-    elif any(v == "unhealthy" for v in health.values()):
+    elif any(v == "unhealthy" for v in checks):
         health["overall"] = "degraded"
     else:
         health["overall"] = "unknown"
-    
+
     return health
 
 
@@ -539,16 +594,46 @@ async def get_system_health(
 async def get_system_metrics(
     current_user = Depends(require_permission(Permission.TENANT_SETTINGS)),
 ):
-    """Get system performance metrics."""
-    # This would connect to Prometheus/Grafana in production
+    """
+    Real system activity metrics.
+
+    Latency/throughput percentiles come from Prometheus/Grafana in a full
+    deployment; here we expose genuine database-backed counters only.
+    """
+    from datetime import datetime, timedelta
+
+    db = await get_prisma()
+    now = datetime.utcnow()
+    day_ago = now - timedelta(hours=24)
+
+    meetings_processed_24h = await db.meeting.count(
+        where={"updatedAt": {"gte": day_ago}, "status": {"in": ["TRANSCRIBED", "EXTRACTED", "COMPLETED"]}}
+    )
+    tasks_created_24h = await db.task.count(where={"createdAt": {"gte": day_ago}})
+    active_users_24h = await db.user.count(where={"updatedAt": {"gte": day_ago}})
+    total_users = await db.user.count()
+    llm_calls_logged = await db.aiauditlog.count()
+    failed_syncs = await db.task.count(where={"syncStatus": "SYNC_FAILED"})
+
+    celery_workers = []
+    try:
+        from app.workers.celery_app import celery_app as _celery
+
+        inspector = _celery.control.inspect(timeout=1.5)
+        ping = inspector.ping() or {}
+        celery_workers = list(ping.keys())
+    except Exception:
+        pass
+
     return {
-        "api_latency_p50_ms": 120,
-        "api_latency_p95_ms": 350,
-        "api_latency_p99_ms": 800,
-        "requests_per_second": 45.2,
-        "error_rate": 0.001,
-        "pipeline_completion_rate": 0.98,
-        "avg_pipeline_duration_seconds": 180,
-        "active_users_24h": 127,
-        "meetings_processed_24h": 89,
+        "meetings_processed_24h": meetings_processed_24h,
+        "tasks_created_24h": tasks_created_24h,
+        "active_users_24h": active_users_24h,
+        "total_users": total_users,
+        "llm_decisions_audited": llm_calls_logged,
+        "failed_syncs": failed_syncs,
+        "celery_workers_online": len(celery_workers),
+        "celery_worker_names": celery_workers,
     }
+
+

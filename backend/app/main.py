@@ -213,7 +213,7 @@ async def health_check():
     try:
         import httpx
         async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get("http://qdrant:6333/healthz")
+            resp = await client.get(f"{settings.QDRANT_URL.rstrip(chr(47))}/healthz")
             services["qdrant"] = "healthy" if resp.status_code == 200 else "unhealthy"
     except Exception:
         services["qdrant"] = "unhealthy"
@@ -221,20 +221,22 @@ async def health_check():
     # Try to check Redis
     try:
         import redis.asyncio as redis
-        r = redis.from_url("redis://redis:6379")
+        r = redis.from_url(settings.REDIS_URL)
         await r.ping()
         services["redis"] = "healthy"
     except Exception:
         services["redis"] = "unhealthy"
     
-    # Try to check LLM Gateway
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get("http://llm-gateway:4000/health/liveliness")
-            services["llm_gateway"] = "healthy" if resp.status_code == 200 else "unhealthy"
-    except Exception:
-        services["llm_gateway"] = "unhealthy"
+    # Optional: LLM Gateway (only when deployed and URL configured)
+    gateway_url = getattr(settings, "LLM_GATEWAY_URL", None)
+    if gateway_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{gateway_url.rstrip('/')}/health/liveliness")
+                services["llm_gateway"] = "healthy" if resp.status_code == 200 else "unhealthy"
+        except Exception:
+            services["llm_gateway"] = "unhealthy"
     
     overall_status = "healthy" if all(v == "healthy" for v in services.values()) else "degraded"
     
