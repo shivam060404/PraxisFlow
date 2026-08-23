@@ -93,6 +93,11 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
         request.state.role = verified.role
         request.state.claims = verified.claims
 
+        # Bind the RLS context for this async context; used by tenant_tx()
+        from app.db.prisma import set_request_tenant
+
+        set_request_tenant(verified.tenant_id)
+
         # NOTE: Postgres RLS is NOT yet enforced on Prisma-generated tables.
         # Tenant isolation is enforced at the application layer until the
         # schema is aligned (@@map + RLS policies). Do not rely on RLS here.

@@ -34,6 +34,10 @@ langchain==0.3.11
 langchain-groq==0.2.2
 langchain-openai==0.2.1
 langgraph==0.2.38
+langgraph-checkpoint==2.0.16
+langgraph-checkpoint-postgres==2.0.15
+langgraph-prebuilt==0.1.5
+psycopg[binary,pool]==3.2.3
 llama-index>=0.12.0,<0.13.0
 llama-index-vector-stores-qdrant>=0.4.0
 llama-index-graph-stores-neo4j>=0.3.0

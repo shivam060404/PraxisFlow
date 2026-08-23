@@ -43,6 +43,14 @@ celery_app.conf.task_routes = {
 
 @worker_init.connect
 def init_worker(**kwargs):
+    """Initialize per-process resources (DB + persistent checkpointer)."""
+    import asyncio
+    from app.agents.checkpointer import init_checkpointer
+
+    try:
+        asyncio.run(init_checkpointer())
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Checkpointer init failed in worker: {e}")
     """Initialize worker resources."""
     logger.info("Celery worker initializing")
 

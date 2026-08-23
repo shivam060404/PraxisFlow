@@ -60,6 +60,11 @@ async def lifespan(app: FastAPI):
 
     # Initialize Prisma
     await get_prisma()
+
+    # Persistent LangGraph checkpointer (HITL state survives restarts)
+    from app.agents.checkpointer import init_checkpointer, close_checkpointer
+
+    await init_checkpointer()
     
     # Initialize observability stack
     init_observability(
@@ -85,11 +90,37 @@ async def lifespan(app: FastAPI):
         await startup_kafka()
     except Exception as e:
         logger.error(f"Failed to start Kafka consumers: {e}")
-    
+
+    # Start the cross-instance WebSocket relay (Redis pub/sub)
+    import asyncio as _asyncio
+    from app.api import websocket as ws_module
+
+    ws_module._ws_listener_task = _asyncio.create_task(ws_module.ws_subscriber_loop())
+    logger.info("WebSocket Redis relay started")
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down PraxisFlow Backend")
+
+    # Stop the WS Redis relay
+    from app.api.websocket import _ws_listener_task
+
+    if _ws_listener_task is not None:
+        _ws_listener_task.cancel()
+
+    # Release the gateway's Redis budget connection
+    try:
+        from app.gateway.client import LLMGatewayClient
+
+        _gw = LLMGatewayClient()
+        await _gw.budget_manager.close()
+    except Exception:
+        pass
+
+    from app.agents.checkpointer import close_checkpointer
+
+    await close_checkpointer()
     await shutdown_kafka()
     await close_prisma()
     shutdown_observability()

@@ -72,6 +72,33 @@ async def prisma_context() -> AsyncGenerator[Prisma, None]:
         raise
 
 
+@asynccontextmanager
+async def tenant_tx(db: Prisma):
+    """
+    Interactive transaction with the Row-Level-Security tenant bound to the
+    connection. All queries inside run under `app.current_tenant`, enforced
+    by the database itself (when the app connects as the restricted role).
+
+    Usage:
+        async with tenant_tx(db) as tx:
+            tasks = await tx.task.find_many(where={...})
+    """
+    tenant_id = get_request_tenant()
+    if not _UUID_RE.match(tenant_id or ""):
+        raise RuntimeError(
+            "tenant_tx() requires an authenticated tenant context "
+            "(middleware must run first)"
+        )
+
+    async with db.tx() as tx:
+        # is_local=true scopes the setting to THIS transaction only, which is
+        # what makes it safe with pooled connections.
+        await tx.execute_raw(
+            "SELECT set_config('app.current_tenant', $1, true)", tenant_id
+        )
+        yield tx
+
+
 # Dependency for FastAPI
 async def get_db() -> AsyncGenerator[Prisma, None]:
     """FastAPI dependency for database access."""
@@ -79,12 +106,23 @@ async def get_db() -> AsyncGenerator[Prisma, None]:
         yield db
 
 
-# RLS Helpers
-# NOTE: parameterized — tenant_id is never interpolated into SQL. Callers must
-# still treat these as no-ops until RLS policies exist on the Prisma-managed
-# tables (see middleware note on application-layer isolation).
-
+# ─── RLS support ───
+# The middleware records the verified tenant on this ContextVar per request;
+# tenant_tx() binds it to the transaction's connection via set_config(...,
+# is_local=true), satisfying the policies in infrastructure/docker/rls-setup.sql.
 import re as _re
+from contextvars import ContextVar as _ContextVar
+
+_current_tenant_cv: _ContextVar = _ContextVar("current_rls_tenant", default="")
+
+
+def set_request_tenant(tenant_id: str) -> None:
+    """Record the verified tenant for the current async context."""
+    _current_tenant_cv.set(tenant_id or "")
+
+
+def get_request_tenant() -> str:
+    return _current_tenant_cv.get()
 
 _UUID_RE = _re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", _re.IGNORECASE

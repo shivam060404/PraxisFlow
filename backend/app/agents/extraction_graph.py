@@ -5,7 +5,6 @@ from typing import List, Optional, Dict, Any
 import json
 import logging
 import asyncio
-import threading
 import time
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -885,19 +884,7 @@ async def persistence_node(state: ExtractionState) -> ExtractionState:
 # (Still per-process; swap for a persistent Postgres/Redis checkpointer before
 # scaling beyond a single API instance.)
 
-_shared_checkpointer = None
-_checkpointer_lock = threading.Lock()
-
-
-def get_shared_checkpointer():
-    global _shared_checkpointer
-    if _shared_checkpointer is None:
-        with _checkpointer_lock:
-            if _shared_checkpointer is None:
-                from langgraph.checkpoint.memory import MemorySaver
-
-                _shared_checkpointer = MemorySaver()
-    return _shared_checkpointer
+from app.agents.checkpointer import get_shared_checkpointer  # re-export for callers
 
 
 def build_extraction_graph() -> StateGraph:

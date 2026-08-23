@@ -1,17 +1,26 @@
 """
-Semantic Cache for LLM Gateway.
-Uses Qdrant vector similarity to cache LLM responses.
+LLM response cache for the gateway.
+
+Two modes:
+  - "semantic": real text-embedding-3-large vectors via OpenAI — similar
+    prompts can hit within the similarity threshold.
+  - "exact" (default without OPENAI_API_KEY): byte-identical prompt keys
+    only. We deliberately DO NOT fabricate similarity from hash-derived
+    pseudo-vectors: hash embeddings make every score meaningless.
+
+The hot path used by LLMGatewayClient (get/set by exact key) behaves the
+same in both modes.
 """
 
 import json
 import hashlib
+from collections import OrderedDict
 import logging
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.core.config import settings
-from app.services.storage import storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +49,9 @@ class SemanticCache:
         self.ttl_days = 30
         self._initialized = False
         self._client = None
+        # "exact" until an embedding provider is available
+        self.mode = "exact"
+        self._embedding_cache: "OrderedDict[str, List[float]]" = OrderedDict()
 
     async def initialize(self):
         """Initialize Qdrant client and collection."""
@@ -64,24 +76,49 @@ class SemanticCache:
                     vectors_config=VectorParams(size=3072, distance=Distance.COSINE),
                 )
 
+            self.mode = "semantic" if getattr(settings, "OPENAI_API_KEY", None) else "exact"
             self._initialized = True
-            logger.info("Semantic cache initialized")
+            logger.info(f"Cache initialized (mode={self.mode})")
 
         except Exception as e:
             logger.warning(f"Semantic cache unavailable: {e}")
             self.enabled = False
 
-    def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding for cache key. Uses simple hash-based for now."""
-        # In production, use actual embedding model
-        # For now, create a deterministic pseudo-embedding
-        hash_bytes = hashlib.sha256(text.encode()).digest()
-        # Expand to 3072 dimensions
-        embedding = []
-        for i in range(3072):
-            byte_idx = i % len(hash_bytes)
-            embedding.append((hash_bytes[byte_idx] / 255.0) * 2 - 1)
-        return embedding
+    _EMBED_MODEL = "text-embedding-3-large"
+    _EMBED_DIMS = 3072
+    _EMBED_CACHE_MAX = 512
+
+    def _generate_embedding(self, text: str) -> Optional[List[float]]:
+        """
+        Real embedding via OpenAI, memoized per process.
+        Returns None when no provider is configured — callers must then use
+        exact-match lookups instead of vector search.
+        """
+        if not getattr(settings, "OPENAI_API_KEY", None):
+            return None
+
+        cached = self._embedding_cache.get(text)
+        if cached is not None:
+            return cached
+
+        try:
+            from openai import AsyncOpenAI
+
+            client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            import asyncio
+
+            resp = asyncio.get_event_loop().run_until_complete(
+                client.embeddings.create(model=self._EMBED_MODEL, input=text[:8000])
+            )
+            vector = resp.data[0].embedding
+        except Exception as e:
+            logger.warning(f"Embedding failed ({e}); falling back to exact match")
+            return None
+
+        if len(self._embedding_cache) >= self._EMBED_CACHE_MAX:
+            self._embedding_cache.popitem(last=False)
+        self._embedding_cache[text] = vector
+        return vector
 
     def _get_collection_name(self, tenant_id: str) -> str:
         """Get tenant-specific collection name."""
@@ -181,7 +218,12 @@ class SemanticCache:
             return False
 
     async def find_similar(self, prompt: str, tenant_id: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """Find similar cached responses using vector similarity."""
+        """
+        Find cached responses similar to the prompt.
+
+        Semantic mode uses true embeddings; exact mode returns ONLY the
+        byte-identical prompt (never approximations).
+        """
         if not self.enabled or not self._initialized:
             return []
 
@@ -189,6 +231,15 @@ class SemanticCache:
             from qdrant_client.models import Filter, FieldCondition, MatchValue
 
             embedding = self._generate_embedding(prompt)
+            if embedding is None:
+                # Exact mode: identical prompt only
+                exact_key = hashlib.sha256(
+                    json.dumps({"prompt": prompt}, sort_keys=True).encode()
+                ).hexdigest()
+                hit = await self.get(exact_key)
+                if hit:
+                    return [{"response": hit, "similarity": 1.0, "cache_key": exact_key}]
+                return []
 
             results = self._client.search(
                 collection_name="semantic_cache",

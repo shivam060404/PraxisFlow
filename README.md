@@ -463,10 +463,11 @@ make security-scan
 
 ### Security Features
 - TLS 1.3 for all connections
-- Row-Level Security for multi-tenant isolation
+- Row-Level Security for multi-tenant isolation (apply `infrastructure/docker/rls-setup.sql` after `prisma db push`; connect as the restricted `praxisflow_app` role)
+- JWT authentication via Clerk (RS256/JWKS) or local HS256 in dev; production refuses default secrets
+- Tenant scoping enforced on every query; RLS context bound per transaction via `tenant_tx()`
 - PII redaction at ingestion (Presidio)
-- JWT authentication via Clerk + RBAC/ABAC middleware
-- Webhook signature verification (HMAC-SHA256)
+- Webhook signature verification (HMAC-SHA256, multi-tenant secret matching)
 - AI audit logging for every LLM decision
 - HashiCorp Vault / AWS Secrets Manager for secrets
 

@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # Retention window for audit logs (EU AI Act Art. 19 / GDPR)
     AUDIT_RETENTION_DAYS: int = 2555  # 7 years
 
+    # LangGraph checkpoint persistence (postgres | memory)
+    CHECKPOINTER_BACKEND: str = "postgres"
+
     # LLM Settings
     EXTRACTION_MODEL: str = "groq/llama-3.3-70b-versatile"
     EXTRACTION_TEMPERATURE: float = 0.1

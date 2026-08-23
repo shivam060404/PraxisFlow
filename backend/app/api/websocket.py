@@ -63,15 +63,22 @@ class ConnectionManager:
                     except Exception:
                         pass  # Connection likely closed
     
-    async def broadcast_to_tenant(self, message: dict, tenant_id: str):
-        """Broadcast message to all users in a tenant."""
+    async def broadcast_to_tenant_local(self, message: dict, tenant_id: str):
+        """Deliver to sockets connected to THIS process only."""
         if tenant_id in self.active_connections:
             for user_id, connections in self.active_connections[tenant_id].items():
                 for ws in connections:
                     try:
                         await ws.send_json(message)
                     except Exception:
-                        pass
+                        pass  # Connection likely closed
+
+    async def broadcast_to_tenant(self, message: dict, tenant_id: str):
+        """Broadcast to all users of a tenant across ALL instances via Redis."""
+        delivered = await _publish_ws_event(tenant_id, message)
+        if not delivered:
+            # Redis unavailable: at least serve locally-connected clients
+            await self.broadcast_to_tenant_local(message, tenant_id)
     
     async def broadcast_task_update(self, tenant_id: str, task_data: dict):
         """Broadcast task update to all users in tenant."""
@@ -91,6 +98,62 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+# ─── Cross-worker event fanout ───
+# Each API instance publishes events to one Redis channel and consumes from
+# it; every instance then relays to its OWN local sockets. This makes
+# real-time updates work when uvicorn runs --workers N.
+
+WS_EVENT_CHANNEL = "praxisflow:ws-events"
+_ws_listener_task = None
+
+
+async def _publish_ws_event(tenant_id: str, message: dict) -> bool:
+    """Publish to Redis; returns False when Redis is unavailable."""
+    import redis.asyncio as redis_lib
+
+    try:
+        client = redis_lib.from_url(settings.REDIS_URL)
+        await client.publish(
+            WS_EVENT_CHANNEL,
+            json.dumps({"tenant_id": tenant_id, "message": message}),
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"WS publish failed ({e}); delivering locally only")
+        return False
+
+
+async def ws_subscriber_loop():
+    """Relay published WS events to this instance's local connections."""
+    import redis.asyncio as redis_lib
+
+    while True:
+        client = redis_lib.from_url(settings.REDIS_URL)
+        pubsub = client.pubsub()
+        try:
+            await pubsub.subscribe(WS_EVENT_CHANNEL)
+            async for raw in pubsub.listen():
+                if raw.get("type") != "message":
+                    continue
+                try:
+                    data = json.loads(raw["data"])
+                    tenant_id = data.get("tenant_id")
+                    message = data.get("message")
+                    if tenant_id and message is not None:
+                        await manager.broadcast_to_tenant_local(message, tenant_id)
+                except Exception as e:
+                    logger.warning(f"WS relay error: {e}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"WS subscriber disconnected ({e}); retrying in 2s")
+            await asyncio.sleep(2)
+        finally:
+            try:
+                await pubsub.aclose()
+            except Exception:
+                pass
 
 
 async def get_tenant_user_from_token(token: str) -> tuple[str, str]:
