@@ -25,6 +25,23 @@ class IntegrationAdapterFactory:
         return cls._adapters[provider]()
 
     @classmethod
+    def create_adapter(cls, integration: Any) -> tuple:
+        """
+        Build (adapter, config) from a Prisma Integration row.
+
+        The row must expose ``provider``, ``displayName``, ``config`` (dict)
+        and optionally ``webhookSecret``.
+        """
+        provider = str(integration.provider).lower()
+        config = IntegrationConfig(
+            provider=provider,
+            display_name=getattr(integration, "displayName", "") or "",
+            config=integration.config if isinstance(integration.config, dict) else {},
+            webhook_secret=getattr(integration, "webhookSecret", None),
+        )
+        return cls.get_adapter(provider), config
+
+    @classmethod
     def list_providers(cls) -> list:
         """List registered providers."""
         return list(cls._adapters.keys())

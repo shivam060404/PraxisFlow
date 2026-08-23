@@ -8,7 +8,7 @@ from app.db.prisma import get_db, prisma_context
 from app.schemas import (
     Meeting, MeetingCreate, MeetingUpdate, MeetingStatus,
     Attendee, AttendeeCreate,
-    PaginatedResponse, ErrorResponse
+    PaginatedResponse, ErrorResponse, to_prisma_data
 )
 from app.core.config import settings
 from app.services.storage import StorageService
@@ -172,13 +172,9 @@ async def update_meeting(
             detail="Meeting not found",
         )
     
-    update_data = meeting_data.model_dump(exclude_unset=True)
-    if "scheduled_at" in update_data:
-        update_data["scheduledAt"] = update_data.pop("scheduled_at")
-    
     updated = await db.meeting.update(
         where={"id": str(meeting_id)},
-        data=update_data,
+        data=to_prisma_data(meeting_data),
     )
     
     return updated

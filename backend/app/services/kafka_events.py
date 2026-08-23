@@ -204,3 +204,37 @@ class EventBuilder:
 
 # Global instance
 kafka_event_bus = KafkaEventBus()
+
+
+class KafkaEventPublisher:
+    """Thin publish facade over the event bus for one-off producers."""
+
+    async def publish(
+        self,
+        topic: str,
+        event: Dict[str, Any],
+        key: Optional[str] = None,
+    ) -> None:
+        await kafka_event_bus.send(topic, event, key=key)
+
+    async def publish_hitl_event(
+        self,
+        event_type: str,
+        meeting_id: str,
+        tenant_id: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        await self.publish(
+            "hitl-events",
+            {
+                "type": event_type,
+                "meeting_id": meeting_id,
+                "tenant_id": tenant_id,
+                "payload": payload,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            key=tenant_id,
+        )
+
+
+kafka_event_publisher = KafkaEventPublisher()

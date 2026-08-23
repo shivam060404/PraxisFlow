@@ -7,7 +7,7 @@ from uuid import UUID
 from app.core.config import settings
 from app.db.prisma import get_prisma
 from app.security import require_permission, Role, Permission
-from app.schemas import UserCreate, UserUpdate, UserResponse
+from app.schemas import UserCreate, UserUpdate, UserResponse, to_prisma_data
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -63,7 +63,7 @@ async def update_tenant(
     db = await get_prisma()
     tenant = await db.tenant.update(
         where={"id": current_user.tenant_id},
-        data=settings.model_dump(exclude_unset=True),
+        data=to_prisma_data(settings),
     )
     return tenant
 
@@ -184,10 +184,6 @@ async def invite_user(
             "fullName": invite.full_name,
             "role": invite.role.value,
             "status": "INVITED",
-            "attributes": {
-                "department": invite.department,
-                "team": invite.team,
-            },
         }
     )
     
@@ -205,7 +201,7 @@ async def update_user(
     """Update user details."""
     db = await get_prisma()
     
-    user = await db.user.find_unique(where={"id": str(user_id), "tenantId": current_user.tenant_id})
+    user = await db.user.find_first(where={"id": str(user_id), "tenantId": current_user.tenant_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -216,7 +212,7 @@ async def update_user(
     
     updated = await db.user.update(
         where={"id": str(user_id)},
-        data=update.model_dump(exclude_unset=True),
+        data=to_prisma_data(update),
     )
     return updated
 
@@ -311,7 +307,7 @@ async def update_integration(
     """Update integration configuration."""
     db = await get_prisma()
     
-    integration = await db.integration.find_unique(
+    integration = await db.integration.find_first(
         where={"id": str(integration_id), "tenantId": current_user.tenant_id}
     )
     if not integration:
@@ -319,7 +315,7 @@ async def update_integration(
     
     updated = await db.integration.update(
         where={"id": str(integration_id)},
-        data=config.model_dump(exclude_unset=True),
+        data=to_prisma_data(config),
     )
     return updated
 
@@ -332,7 +328,7 @@ async def delete_integration(
     """Delete an integration."""
     db = await get_prisma()
     
-    integration = await db.integration.find_unique(
+    integration = await db.integration.find_first(
         where={"id": str(integration_id), "tenantId": current_user.tenant_id}
     )
     if not integration:
@@ -350,18 +346,18 @@ async def test_integration(
     """Test integration connectivity."""
     db = await get_prisma()
     
-    integration = await db.integration.find_unique(
+    integration = await db.integration.find_first(
         where={"id": str(integration_id), "tenantId": current_user.tenant_id}
     )
     if not integration:
         raise HTTPException(status_code=404, detail="Integration not found")
     
     # Import and use the appropriate adapter
-    from app.integrations.factory import IntegrationFactory
-    
+    from app.integrations.factory import IntegrationAdapterFactory
+
     try:
-        adapter = IntegrationFactory.create_adapter(integration)
-        health = await adapter.health_check()
+        adapter, cfg = IntegrationAdapterFactory.create_adapter(integration)
+        health = await adapter.test_connection(cfg)
         return health
     except Exception as e:
         return {"healthy": False, "error": str(e)}
@@ -375,7 +371,7 @@ async def trigger_sync(
     """Trigger a manual synchronization."""
     db = await get_prisma()
     
-    integration = await db.integration.find_unique(
+    integration = await db.integration.find_first(
         where={"id": str(integration_id), "tenantId": current_user.tenant_id}
     )
     if not integration:
@@ -403,22 +399,29 @@ async def get_audit_logs(
     user_id: Optional[UUID] = None,
     current_user = Depends(require_permission(Permission.AUDIT_LOG_READ)),
 ):
-    """Get audit logs with filtering."""
+    """Get AI audit logs with filtering (EU AI Act Art. 12 records)."""
     db = await get_prisma()
-    
+
     where = {"tenantId": current_user.tenant_id}
-    
+
     if start_date:
         where["createdAt"] = {"gte": start_date}
     if end_date:
         where.setdefault("createdAt", {})["lte"] = end_date
     if action:
-        where["action"] = action
+        # Filter by AI decision type (e.g. "extraction", "verification")
+        where["decisionType"] = action
     if user_id:
-        where["userId"] = str(user_id)
-    
-    total = await db.auditlog.count(where=where)
-    logs = await db.auditlog.find_many(
+        # AiAuditLog is keyed by task/meeting, not user — filter via tasks
+        # assigned to this user.
+        user_tasks = await db.task.find_many(
+            where={"tenantId": current_user.tenant_id, "assigneeId": str(user_id)},
+            select={"id": True},
+        )
+        where["taskId"] = {"in": [t.id for t in user_tasks]} or ["__none__"]
+
+    total = await db.aiauditlog.count(where=where)
+    logs = await db.aiauditlog.find_many(
         where=where,
         skip=(page - 1) * page_size,
         take=page_size,

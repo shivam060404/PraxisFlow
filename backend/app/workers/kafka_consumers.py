@@ -231,6 +231,30 @@ class KafkaConsumerManager:
 kafka_consumer_manager = KafkaConsumerManager()
 
 
+async def send_integration_sync(tenant_id: str, integration_id: str) -> None:
+    """Request sync of all synced tasks for an integration via the event bus."""
+    from app.services.kafka_events import EventBuilder, kafka_event_bus
+    from app.db.prisma import get_prisma
+
+    db = await get_prisma()
+    tasks = await db.task.find_many(
+        where={"integrationId": integration_id, "syncStatus": {"in": ["SYNCED", "SYNC_FAILED"]}},
+    )
+
+    logger.info(
+        f"Queueing sync for {len(tasks)} task(s) on integration {integration_id}"
+    )
+    for task in tasks:
+        await kafka_event_bus.send(
+            Topics.TASK_SYNC_REQUESTED,
+            EventBuilder.task_sync_requested(
+                task_id=task.id,
+                tenant_id=tenant_id,
+                integration_id=integration_id,
+            ),
+        )
+
+
 # Startup/shutdown handlers
 async def startup_kafka():
     """Start Kafka consumers on application startup."""

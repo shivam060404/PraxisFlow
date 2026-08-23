@@ -22,6 +22,8 @@ model Tenant {
   meetings     Meeting[]
   integrations Integration[]
   tasks        Task[]
+  dataSubjectRequests  DataSubjectRequest[]
+  complianceExports    ComplianceExport[]
   aiAuditLogs  AiAuditLog[]
 
   @@index([slug])
@@ -35,6 +37,8 @@ model User {
   fullName     String
   avatarUrl    String?
   role         String   @default("member")
+  status       String   @default("ACTIVE") // INVITED | ACTIVE | SUSPENDED | DELETED
+  deletedAt    DateTime?
   clerkUserId  String?  @unique
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -312,4 +316,41 @@ model MeetingFlag {
   resolver  User?   @relation("ResolvedFlags", fields: [resolvedBy], references: [id])
 
   @@index([meetingId])
+}
+// ─── GDPR Data Subject Requests ───
+model DataSubjectRequest {
+  id                      String   @id @default(uuid())
+  tenantId                String
+  requestType             String   // access | rectification | erasure | portability | restriction | objection
+  dataSubjectId           String?  // User id, when resolvable in this tenant
+  dataSubjectEmail        String
+  status                  String   @default("pending") // pending | in_progress | completed | rejected | extended
+  reason                  String?  @db.Text
+  specificDataCategories  Json?
+  responseData            Json?
+  completedAt             DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+// ─── GDPR Art. 20 Compliance Exports ───
+model ComplianceExport {
+  id          String    @id @default(uuid())
+  tenantId    String
+  format      String    @default("json") // json | csv | pdf
+  status      String    @default("pending") // pending | completed | failed
+  downloadUrl String?
+  error       String?   @db.Text
+  expiresAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
 }

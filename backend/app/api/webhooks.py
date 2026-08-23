@@ -12,13 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Request, HTTPException, Header, Depends
+from fastapi import APIRouter, Request, HTTPException, Header, Depends, status
 from pydantic import BaseModel
 
 from app.db.prisma import get_prisma
-from app.integrations.factory import IntegrationFactory
+from app.integrations.factory import IntegrationAdapterFactory
 from app.security import require_permission, Permission
-from app.schemas import WebhookEvent
 from app.agents.graph_runner import (
     resume_extraction_pipeline_wrapper,
     check_pipeline_status,
@@ -149,7 +148,10 @@ VERIFIERS = {
 
 # ─── Webhook Endpoints ───
 
-@router.post("/{provider}")
+# Providers backed by a Prisma enum + registered adapter
+SUPPORTED_PROVIDERS = {"jira", "asana", "linear", "slack", "teams"}
+
+
 async def receive_webhook(
     provider: str,
     request: Request,
@@ -157,101 +159,120 @@ async def receive_webhook(
 ):
     """
     Generic webhook receiver for all integrations.
-    Verifies signature and dispatches to appropriate handler.
+
+    Webhooks carry no tenant context, so we look up every ACTIVE integration
+    for this provider across tenants and verify the signature against each
+    stored webhook secret until one validates (standard multi-tenant pattern).
     """
-    # Get integration config
-    db = await get_prisma()
-    integration = await db.integration.find_unique(
-        where={"tenantId_provider": {"tenantId": "TODO_GET_TENANT", "provider": provider.upper()}}
-    )
-    
-    if not integration:
-        raise HTTPException(status_code=404, detail="Integration not configured")
-    
-    # Verify signature
-    verifier = VERIFIERS.get(provider.lower())
+    provider_l = provider.lower()
+    if provider_l not in SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"Unsupported provider: {provider}")
+
+    verifier = VERIFIERS.get(provider_l)
     if not verifier:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
-    
-    secret = integration.webhookSecret or x_webhook_secret
-    if not secret:
-        raise HTTPException(status_code=400, detail="Webhook secret not configured")
-    
-    result = await verifier.verify(request, secret)
-    if not result.valid:
-        logger.warning(f"Webhook verification failed for {provider}: {result.error}")
-        raise HTTPException(status_code=401, detail=result.error)
-    
+
+    db = await get_prisma()
+    integrations = await db.integration.find_many(
+        where={"provider": provider_l, "status": "ACTIVE"}
+    )
+
+    if not integrations:
+        raise HTTPException(status_code=404, detail="Integration not configured")
+
+    # Verify signature against each candidate tenant's secret
+    integration = None
+    verification_error = None
+    for candidate in integrations:
+        secret = candidate.webhookSecret or x_webhook_secret
+        if not secret:
+            continue
+        result = await verifier.verify(request, secret)
+        if result.valid:
+            integration = candidate
+            break
+        verification_error = result.error
+
+    if integration is None:
+        logger.warning(
+            f"Webhook verification failed for {provider}: {verification_error}"
+        )
+        raise HTTPException(
+            status_code=401,
+            detail=verification_error or "Webhook secret not configured",
+        )
+
     # Parse payload
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
-    
+
     # Dispatch to integration handler
     try:
-        adapter = IntegrationFactory.create(provider, integration.config)
-        event = await adapter.normalize_webhook(payload)
-        
-        # Process based on event type
-        await _process_webhook_event(provider, event, integration)
-        
+        adapter = IntegrationAdapterFactory.get_adapter(provider_l)
+        event = adapter.normalize_webhook(payload)
+
+        await _process_webhook_event(provider_l, event, integration)
+
         return {"status": "ok"}
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Webhook processing failed for {provider}: {e}")
         raise HTTPException(status_code=500, detail="Webhook processing failed")
 
 
-async def _process_webhook_event(provider: str, event: WebhookEvent, integration):
-    """Process webhook event based on type."""
+async def _process_webhook_event(provider: str, event, integration):
+    """Process a normalized webhook event (external status change)."""
     db = await get_prisma()
-    
-    if event.type == "task.updated" or event.type == "issue.updated":
-        # Find corresponding task
-        task = await db.task.find_unique(
-            where={"externalId_integrationId": {"externalId": event.resource_id, "integrationId": integration.id}}
-        )
-        
-        if task:
-            # Update task from external changes
-            updates = {}
-            if event.changes.get("status"):
-                updates["status"] = _map_external_status(provider, event.changes["status"])
-            if event.changes.get("assignee"):
-                updates["assigneeId"] = await _resolve_assignee(event.changes["assignee"], integration.tenantId)
-            if event.changes.get("dueDate"):
-                updates["deadlineDate"] = event.changes["dueDate"]
-            
-            if updates:
-                await db.task.update(where={"id": task.id}, data=updates)
-                
-                # Create audit log
-                await db.taskauditlog.create(
-                    data={
-                        "taskId": task.id,
-                        "previousStatus": task.status,
-                        "newStatus": updates.get("status", task.status),
-                        "changedBy": "webhook",
-                        "reason": f"Updated via {provider} webhook",
-                        "metadata": {"provider": provider, "event": event.dict()},
-                    }
-                )
-    
-    elif event.type == "task.created":
-        # Could auto-create task in PraxisFlow if configured
-        pass
-    
-    elif event.type == "task.deleted":
-        # Handle external deletion
-        task = await db.task.find_unique(
-            where={"externalId_integrationId": {"externalId": event.resource_id, "integrationId": integration.id}}
-        )
-        if task:
-            await db.task.update(
-                where={"id": task.id},
-                data={"syncStatus": "CONFLICT", "status": "DISMISSED"}
-            )
+
+    if not event.external_id:
+        logger.info(f"{provider} webhook carried no external_id; ignoring")
+        return
+
+    task = await db.task.find_first(
+        where={
+            "externalId": event.external_id,
+            "integrationId": integration.id,
+        }
+    )
+
+    if not task:
+        logger.info(f"No local task for external_id={event.external_id} ({provider})")
+        return
+
+    new_status = _map_external_status(provider, event.status or "")
+    if new_status == task.status:
+        return
+
+    await db.task.update(
+        where={"id": task.id},
+        data={
+            "status": new_status,
+            "syncStatus": "SYNCED",
+        },
+    )
+
+    await db.taskauditlog.create(
+        data={
+            "taskId": task.id,
+            "previousStatus": task.status,
+            "newStatus": new_status,
+            "changedBy": f"webhook_{provider}",
+            "reason": f"Status update from {provider}: {event.status}",
+            "metadata": {
+                "provider": provider,
+                "external_url": event.external_url,
+                "changed_at": str(event.changed_at),
+            },
+        }
+    )
+
+    logger.info(
+        f"Task {task.id} moved {task.status} -> {new_status} via {provider} webhook"
+    )
 
 
 def _map_external_status(provider: str, status: str) -> str:
@@ -276,15 +297,6 @@ def _map_external_status(provider: str, status: str) -> str:
         },
     }
     return mappings.get(provider.lower(), {}).get(status, "SYNCED")
-
-
-async def _resolve_assignee(external_id: str, tenant_id: str) -> Optional[str]:
-    """Resolve external assignee to internal user."""
-    db = await get_prisma()
-    user = await db.user.find_first(
-        where={"tenantId": tenant_id, "attributes": {"path": "$.external_ids", "array_contains": external_id}}
-    )
-    return user.id if user else None
 
 
 # ─── Specific Webhook Endpoints ───
@@ -339,36 +351,19 @@ async def register_webhook(
     registration: WebhookRegistration,
     current_user = Depends(require_permission(Permission.INTEGRATION_CREATE)),
 ):
-    """Register a new webhook with an external provider."""
-    db = await get_prisma()
-    
-    integration = await db.integration.find_unique(
-        where={"tenantId_provider": {"tenantId": current_user.tenant_id, "provider": registration.provider.upper()}}
+    """Register a new webhook with an external provider.
+
+    Provider-side webhook registration APIs are not implemented in the
+    adapters yet; this returns an explicit 501 instead of crashing.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=(
+            f"{registration.provider} adapter does not implement server-side "
+            "webhook registration yet. Configure the webhook directly in the "
+            "provider console pointing at /api/v1/webhooks/{provider}."
+        ),
     )
-    
-    if not integration:
-        raise HTTPException(status_code=404, detail="Integration not found")
-    
-    # Register with provider
-    adapter = IntegrationFactory.create(registration.provider, integration.config)
-    
-    try:
-        webhook_id = await adapter.register_webhook(
-            url=registration.url,
-            events=registration.events,
-            secret=registration.secret,
-        )
-        
-        # Update integration with webhook ID
-        await db.integration.update(
-            where={"id": integration.id},
-            data={"webhookId": webhook_id, "webhookUrl": registration.url}
-        )
-        
-        return {"webhook_id": webhook_id, "status": "registered"}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to register webhook: {e}")
 
 
 @router.delete("/{provider}", dependencies=[Depends(require_permission(Permission.INTEGRATION_DELETE))])
@@ -376,30 +371,11 @@ async def unregister_webhook(
     provider: str,
     current_user = Depends(require_permission(Permission.INTEGRATION_DELETE)),
 ):
-    """Unregister webhook from provider."""
-    db = await get_prisma()
-    
-    integration = await db.integration.find_unique(
-        where={"tenantId_provider": {"tenantId": current_user.tenant_id, "provider": provider.upper()}}
+    """Unregister a webhook from a provider (not implemented in adapters yet)."""
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=f"{provider} adapter does not implement webhook deregistration yet.",
     )
-    
-    if not integration or not integration.webhookId:
-        raise HTTPException(status_code=404, detail="Webhook not registered")
-    
-    adapter = IntegrationFactory.create(provider, integration.config)
-    
-    try:
-        await adapter.unregister_webhook(integration.webhookId)
-        
-        await db.integration.update(
-            where={"id": integration.id},
-            data={"webhookId": None, "webhookUrl": None}
-        )
-        
-        return {"status": "unregistered"}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to unregister webhook: {e}")
 
 
 @router.get("/{provider}/test", dependencies=[Depends(require_permission(Permission.INTEGRATION_READ))])
@@ -407,23 +383,11 @@ async def test_webhook(
     provider: str,
     current_user = Depends(require_permission(Permission.INTEGRATION_READ)),
 ):
-    """Send a test webhook to verify configuration."""
-    db = await get_prisma()
-    
-    integration = await db.integration.find_unique(
-        where={"tenantId_provider": {"tenantId": current_user.tenant_id, "provider": provider.upper()}}
+    """Send a test webhook payload from the provider (not implemented yet)."""
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=f"{provider} adapter does not implement test webhook delivery yet.",
     )
-    
-    if not integration:
-        raise HTTPException(status_code=404, detail="Integration not found")
-    
-    adapter = IntegrationFactory.create(provider, integration.config)
-    
-    try:
-        result = await adapter.send_test_webhook()
-        return {"status": "sent", "result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Test webhook failed: {e}")
 
 
 # ─── HITL (Human-in-the-Loop) Webhook Endpoints ───
@@ -556,3 +520,15 @@ async def emit_hitl_event(
     }
     
     await kafka_event_publisher.publish("hitl-events", event)
+
+
+# ─── Generic Catch-all Route (must be registered LAST) ───
+
+@router.post("/{provider}")
+async def receive_webhook_endpoint(
+    provider: str,
+    request: Request,
+    x_webhook_secret: Optional[str] = Header(None),
+):
+    """Generic webhook receiver — registered after all concrete webhook paths."""
+    return await receive_webhook(provider, request, x_webhook_secret)

@@ -8,7 +8,7 @@ from app.schemas import (
     Task, TaskCreate, TaskUpdate, TaskStatus, TaskType,
     Priority, VerificationStatus, SyncStatus,
     TaskAuditLog, TaskAuditLogCreate,
-    PaginatedResponse
+    PaginatedResponse, to_prisma_data
 )
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
@@ -164,9 +164,9 @@ async def update_task(
     
     updated = await db.task.update(
         where={"id": str(task_id)},
-        data=update_data,
+        data=to_prisma_data(task_data),
     )
-    
+
     return updated
 
 
@@ -322,14 +322,14 @@ async def bulk_update_tasks(
                     "taskId": str(task_id),
                     "previousStatus": task.status,
                     "newStatus": new_status,
-                    "changedBy": changed_by,
+                    "changedBy": str(changed_by),
                     "reason": update_data.get("reason", "Bulk update"),
                 }
             )
         
         updated = await db.task.update(
             where={"id": str(task_id)},
-            data=update_data,
+            data=to_prisma_data(task_data),
         )
         results.append(updated)
     

@@ -249,7 +249,7 @@ async def process_data_subject_request(
     if request.status != DataSubjectRequestStatus.PENDING.value:
         raise HTTPException(status_code=400, detail="Request already processed")
     
-    background_tasks.add_task(process_data_subject_request, request_id)
+    background_tasks.add_task(_run_data_subject_request, request_id)
     
     return {"message": "Processing started", "request_id": request_id}
 
@@ -264,8 +264,16 @@ async def export_tenant_data(
     _: None = Depends(require_permission(Permission.COMPLIANCE_EXPORT)),
 ):
     """Export all tenant data for compliance (GDPR Art. 20)."""
-    export_id = str(uuid.uuid4())
-    
+    db = await get_prisma()
+    export = await db.complianceexport.create(
+        data={
+            "tenantId": subject.tenant_id,
+            "format": export_request.format,
+            "status": "pending",
+        }
+    )
+    export_id = export.id
+
     # Queue background export
     background_tasks.add_task(
         generate_compliance_export,
@@ -533,8 +541,8 @@ async def get_model_cards(
 
 # ─── Background Tasks ───
 
-async def process_data_subject_request(request_id: str):
-    """Process a data subject request based on type."""
+async def _run_data_subject_request(request_id: str):
+    """Process a data subject request based on type (background worker)."""
     db = await get_prisma()
     
     request = await db.datasubjectrequest.find_unique(where={"id": request_id})
@@ -627,23 +635,33 @@ async def cascade_delete_tenant(tenant_id: str):
     # Delete in order to respect foreign keys
     # 1. AI Audit Logs
     await db.aiauditlog.delete_many(where={"tenantId": tenant_id})
-    
-    # 2. Task Audit Logs
-    await db.taskauditlog.delete_many(where={"tenantId": tenant_id})
-    
-    # 3. Tasks
+
+    # 2. Compliance records
+    await db.complianceexport.delete_many(where={"tenantId": tenant_id})
+    await db.datasubjectrequest.delete_many(where={"tenantId": tenant_id})
+
+    # 3. Task audit logs are keyed by task, not tenant — resolve first
+    tenant_tasks = await db.task.find_many(
+        where={"tenantId": tenant_id}, select={"id": True}
+    )
+    if tenant_tasks:
+        await db.taskauditlog.delete_many(
+            where={"taskId": {"in": [t.id for t in tenant_tasks]}}
+        )
+
+    # 4. Tasks
     await db.task.delete_many(where={"tenantId": tenant_id})
     
-    # 4. Meetings (cascades to transcripts, attendees, flags)
+    # 5. Meetings (cascades to transcripts, attendees, flags)
     await db.meeting.delete_many(where={"tenantId": tenant_id})
-    
-    # 5. Integrations
+
+    # 6. Integrations
     await db.integration.delete_many(where={"tenantId": tenant_id})
-    
-    # 6. Users
+
+    # 7. Users
     await db.user.delete_many(where={"tenantId": tenant_id})
-    
-    # 7. Tenant
+
+    # 8. Tenant
     await db.tenant.delete(where={"id": tenant_id})
 
 

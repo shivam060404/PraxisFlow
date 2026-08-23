@@ -34,6 +34,10 @@ class ExtractedTask(BaseModel):
     hallucination_score: Optional[float] = Field(default=None, ge=0, le=1)
     completeness_score: Optional[float] = Field(default=None, ge=0, le=1)
 
+    # Assignee resolution fields (filled by entity_resolution_node)
+    assignee_id: Optional[str] = None
+    assignee_resolved_by: Optional[str] = None
+
     # HITL fields
     requires_human_review: bool = False
     human_review_reason: Optional[str] = None

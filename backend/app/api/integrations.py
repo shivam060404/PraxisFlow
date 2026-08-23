@@ -6,7 +6,7 @@ from datetime import datetime
 from app.db.prisma import get_db
 from app.schemas import (
     Integration, IntegrationCreate, IntegrationUpdate, IntegrationProvider,
-    PaginatedResponse
+    PaginatedResponse, to_prisma_data
 )
 from app.integrations.factory import IntegrationAdapterFactory
 
@@ -102,11 +102,9 @@ async def update_integration(
             detail="Integration not found",
         )
     
-    update_data = integration_data.model_dump(exclude_unset=True)
-    
     updated = await db.integration.update(
         where={"id": str(integration_id)},
-        data=update_data,
+        data=to_prisma_data(integration_data),
     )
     
     return updated

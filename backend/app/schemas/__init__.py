@@ -9,6 +9,21 @@ import uuid
 # ─── Base Models ───
 from pydantic.alias_generators import to_camel
 
+
+def to_prisma_data(model: BaseModel) -> dict:
+    """Convert a Pydantic model's explicitly-set fields into Prisma-compatible data.
+
+    Prisma's Python client expects camelCase field names plus JSON-mode values
+    (UUID -> str, datetime -> ISO string). Feeding raw snake_case ``model_dump``
+    output raises runtime errors on every update path, so all update endpoints
+    should route through this helper.
+    """
+    return {
+        to_camel(k): v
+        for k, v in model.model_dump(mode="json", exclude_unset=True).items()
+        if v is not None
+    }
+
 class BaseModelConfig(BaseModel):
     model_config = ConfigDict(
         from_attributes=True,

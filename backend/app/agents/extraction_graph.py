@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import json
 import logging
 import asyncio
+import threading
 import time
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -751,6 +752,9 @@ async def entity_resolution_node(state: ExtractionState) -> ExtractionState:
                                     f"Resolved '{task.assignee_hint}' → {result.assignee_name} "
                                     f"(confidence={result.confidence:.2f}, method={result.method})"
                                 )
+                                # Persist resolution onto the task so it reaches the DB
+                                task.assignee_id = str(result.assignee_id)
+                                task.assignee_resolved_by = f"{result.method} ({result.confidence:.2f})"
                         except Exception as e:
                             logger.warning(f"Entity resolution failed for '{task.assignee_hint}': {e}")
                     
@@ -831,7 +835,8 @@ async def persistence_node(state: ExtractionState) -> ExtractionState:
                     "status": initial_status.value if hasattr(initial_status, 'value') else initial_status,
                     "priority": data.get("priority"),
                     "assigneeHint": data.get("assignee_hint"),
-                    "assigneeId": str(data["assignee_id"]) if data.get("assignee_id") else None,
+                    "assigneeId": task.assignee_id,
+                    "assigneeResolvedBy": task.assignee_resolved_by,
                     "deadlineHint": data.get("deadline_hint"),
                     "transcriptWordStart": data["transcript_word_start"],
                     "transcriptWordEnd": data["transcript_word_end"],
@@ -873,11 +878,33 @@ async def persistence_node(state: ExtractionState) -> ExtractionState:
 
 # ─── Build Graph with Interrupt Support ───
 
+# ─── Shared Checkpointer ───
+# A single process-wide MemorySaver so that run / resume / status all operate
+# on the same thread state. A fresh MemorySaver per call made HITL resume and
+# status endpoints operate on empty graphs.
+# (Still per-process; swap for a persistent Postgres/Redis checkpointer before
+# scaling beyond a single API instance.)
+
+_shared_checkpointer = None
+_checkpointer_lock = threading.Lock()
+
+
+def get_shared_checkpointer():
+    global _shared_checkpointer
+    if _shared_checkpointer is None:
+        with _checkpointer_lock:
+            if _shared_checkpointer is None:
+                from langgraph.checkpoint.memory import MemorySaver
+
+                _shared_checkpointer = MemorySaver()
+    return _shared_checkpointer
+
+
 def build_extraction_graph() -> StateGraph:
     """Build the extraction pipeline graph with HITL interrupt support."""
-    
+
     workflow = StateGraph(ExtractionState)
-    
+
     # Add nodes
     workflow.add_node("chunking", chunking_node)
     workflow.add_node("extraction", extraction_node)
@@ -885,24 +912,24 @@ def build_extraction_graph() -> StateGraph:
     workflow.add_node("verification", verification_node)
     workflow.add_node("entity_resolution", entity_resolution_node)
     workflow.add_node("persistence", persistence_node)
-    
+
     # Define edges
     workflow.set_entry_point("chunking")
-    
+
     workflow.add_edge("chunking", "extraction")
     workflow.add_edge("extraction", "deduplication")
     workflow.add_edge("deduplication", "verification")
     workflow.add_edge("verification", "entity_resolution")
     workflow.add_edge("entity_resolution", "persistence")
     workflow.add_edge("persistence", END)
-    
-    # Compile with checkpointer for interrupt support
-    from langgraph.checkpoint.memory import MemorySaver
-    memory = MemorySaver()
+
+    # Compile with the SHARED checkpointer so run/resume/status all see the
+    # same thread state. A fresh MemorySaver per call made HITL resume and
+    # status endpoints operate on empty graphs.
     app = workflow.compile(
-        checkpointer=memory,
+        checkpointer=get_shared_checkpointer(),
     )
-    
+
     return app
 
 
@@ -917,7 +944,7 @@ async def run_extraction_pipeline(
     pipeline_run_id: Optional[str] = None,
 ) -> ExtractionState:
     """Run the full extraction pipeline for a meeting."""
-    
+
     # Initialize state
     initial_state = ExtractionState(
         meeting_id=meeting_id,
@@ -927,13 +954,13 @@ async def run_extraction_pipeline(
         transcript_chunks=transcript_chunks or [],
         pipeline_run_id=pipeline_run_id or str(uuid4()),
     )
-    
+
     # Build and run graph
     graph = build_extraction_graph()
-    
+
     # Config for checkpointing
     config = {"configurable": {"thread_id": meeting_id}}
-    
+
     try:
         final_state = await graph.ainvoke(initial_state, config=config)
         logger.info(f"Extraction pipeline completed for meeting {meeting_id}")
