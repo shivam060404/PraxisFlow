@@ -38,10 +38,7 @@ export default function TeamPage() {
   });
 
   const inviteMutation = React.useCallback(async (data: typeof inviteForm) => {
-    return api.createUser({
-      tenant_id: "00000000-0000-0000-0000-000000000001",
-      ...data,
-    });
+    return api.createUser({ ...data });
   }, []);
 
   const handleInvite = async (e: React.FormEvent) => {

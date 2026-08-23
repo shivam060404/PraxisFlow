@@ -1,6 +1,36 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig, InternalAxiosRequestConfig } from "axios";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const DEV_AUTH_ENABLED = process.env.NEXT_PUBLIC_DEV_AUTH !== "false";
+const DEV_EMAIL = process.env.NEXT_PUBLIC_DEV_EMAIL || "admin@dev.local";
+const TOKEN_KEY = "auth_token";
+
+/**
+ * Development auth bootstrap: mint a local JWT from the backend's
+ * development-only /auth/dev-token endpoint and cache it.
+ *
+ * In production (Clerk mode) this endpoint 404s and the Clerk session
+ * supplies the bearer token instead.
+ */
+async function ensureDevAuthToken(): Promise<string | null> {
+  if (!DEV_AUTH_ENABLED || typeof window === "undefined") return null;
+  const existing = localStorage.getItem(TOKEN_KEY);
+  if (existing) return existing;
+
+  try {
+    const resp = await fetch(`${API_URL}/api/v1/auth/dev-token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: DEV_EMAIL }),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    localStorage.setItem(TOKEN_KEY, data.access_token);
+    return data.access_token;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The response interceptor unwraps payloads (`response.data`), so callers
@@ -31,16 +61,18 @@ class ApiClient {
     this.client.interceptors.request.use(
       async (config: InternalAxiosRequestConfig) => {
         try {
-          // Resolve a bearer token when an auth provider is available.
-          // Uses Clerk's singleton if configured; falls back to a local
-          // dev token so the dashboard works against the dev backend.
+          // Resolve a bearer token: Clerk session when configured, else the
+          // cached/minted local dev token so the dashboard works out of the box.
           const w = window as unknown as {
             Clerk?: { session?: { getToken?: () => Promise<string | null> } };
           };
           let token: string | null | undefined =
             await w.Clerk?.session?.getToken?.();
           if (!token && typeof localStorage !== "undefined") {
-            token = localStorage.getItem("auth_token");
+            token = localStorage.getItem(TOKEN_KEY);
+          }
+          if (!token && DEV_AUTH_ENABLED) {
+            token = await ensureDevAuthToken();
           }
           if (token) {
             config.headers.Authorization = `Bearer ${token}`;
@@ -58,9 +90,16 @@ class ApiClient {
         // Unwrap payloads so callers work with data directly
         return response.data as unknown as typeof response;
       },
-      (error: AxiosError) => {
-        if (error.response?.status === 401) {
-          if (typeof window !== "undefined") {
+      async (error: AxiosError) => {
+        if (error.response?.status === 401 && typeof window !== "undefined") {
+          const usedDevToken =
+            DEV_AUTH_ENABLED && localStorage.getItem(TOKEN_KEY) !== null;
+          if (usedDevToken) {
+            // Stale dev token: clear it so the next request re-mints
+            localStorage.removeItem(TOKEN_KEY);
+            return Promise.reject(error);
+          }
+          if (!DEV_AUTH_ENABLED) {
             window.location.href = "/sign-in";
           }
         }
@@ -186,7 +225,6 @@ class ApiClient {
   }
 
   async createUser(data: {
-    tenant_id: string;
     email: string;
     full_name: string;
     role?: string;
@@ -321,7 +359,7 @@ class ApiClient {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
     const token =
       typeof window !== "undefined"
-        ? localStorage.getItem("auth_token") ?? ""
+        ? localStorage.getItem(TOKEN_KEY) ?? ""
         : "";
     return new WebSocket(`${wsUrl}/api/v1/ws?token=${encodeURIComponent(token)}&tenant_id=${tenantId}`);
   }

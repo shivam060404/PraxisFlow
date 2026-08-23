@@ -17,7 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 class KafkaConsumerManager:
-    """Manages Kafka consumers for event processing."""
+    """
+    DEPRECATED: Kafka-based event orchestration.
+
+    Celery is the single task orchestrator; the API process no longer starts
+    these consumers (they duplicated worker work and multiplied per uvicorn
+    worker). Retained for reference / opt-in re-enablement only.
+    """
     
     def __init__(self):
         self.consumers = []
@@ -232,8 +238,14 @@ kafka_consumer_manager = KafkaConsumerManager()
 
 
 async def send_integration_sync(tenant_id: str, integration_id: str) -> None:
-    """Request sync of all synced tasks for an integration via the event bus."""
-    from app.services.kafka_events import EventBuilder, kafka_event_bus
+    """
+    Queue sync of all synced tasks for an integration.
+
+    Dispatches straight to Celery: Kafka is no longer an orchestration hop
+    (the API previously ran six consumers that duplicated Celery's work and
+    multiplied across uvicorn workers). The KafkaEventBus remains available
+    as a pure event publisher (HITL/webhook notifications).
+    """
     from app.db.prisma import get_prisma
 
     db = await get_prisma()
@@ -245,14 +257,7 @@ async def send_integration_sync(tenant_id: str, integration_id: str) -> None:
         f"Queueing sync for {len(tasks)} task(s) on integration {integration_id}"
     )
     for task in tasks:
-        await kafka_event_bus.send(
-            Topics.TASK_SYNC_REQUESTED,
-            EventBuilder.task_sync_requested(
-                task_id=task.id,
-                tenant_id=tenant_id,
-                integration_id=integration_id,
-            ),
-        )
+        retry_failed_sync.delay(task.id, integration_id)
 
 
 # Startup/shutdown handlers

@@ -4,112 +4,74 @@ An enterprise-grade agentic AI platform that transforms passive meeting recordin
 
 [![GitHub](https://img.shields.io/badge/GitHub-PraxisFlow-181717?logo=github)](https://github.com/shivam060404/PraxisFlow)
 [![CI/CD](https://img.shields.io/github/actions/workflow/status/shivam060404/PraxisFlow/ci.yml?branch=main)](https://github.com/shivam060404/PraxisFlow/actions)
-[![Security](https://img.shields.io/badge/Security-SOC2%20%7C%20GDPR%20%7C%20EU%20AI%20Act-blue)](docs/COMPLIANCE.md)
+
+> **Status:** working end-to-end prototype — upload → transcribe → PII-redact → extract → verify → assign → sync. Compliance surfaces report verifiable facts only; formal certifications (SOC 2 / ISO 27001) have NOT been performed.
 
 ---
 
 
 ---
 
-## Architecture (v2.0 — Enterprise)
+## Architecture (as built)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        PRESENTATION LAYER                                    │
-│  Next.js 15 │ shadcn/ui │ Kanban │ Real-time WS │ Role-based Dashboards     │
-└──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │ HTTPS / WSS (TLS 1.3)
-┌──────────────────────────────────▼──────────────────────────────────────────┐
-│                        API GATEWAY / EDGE LAYER                              │
-│  Kong/NGINX │ Rate Limiting │ WAF │ Request Validation │ Tenant Resolution   │
-└──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │
-┌──────────────────────────────────▼──────────────────────────────────────────┐
-│                     APPLICATION / API LAYER                                   │
-│  FastAPI │ WebSocket │ Celery Workers │ Kafka Producers/Consumers            │
-│  RBAC/ABAC Engine │ Tenant Middleware │ Request Scoping                      │
-└────────┬─────────────────────────────────────────────────┬──────────────────┘
-         │                                                 │
-┌────────▼────────────────────┐              ┌─────────────▼──────────────────┐
-│     AI ORCHESTRATION        │              │     LLM GATEWAY LAYER          │
-│     LAYER                   │              │                                │
-│  LangGraph Multi-Agent      │◀────────────▶│  LiteLLM Proxy                 │
-│  Pipeline (7 nodes)         │              │  • Unified API (100+ providers)│
-│  • Chunking                 │              │  • Semantic Caching            │
-│  • Extraction               │              │  • Model Routing & Fallbacks   │
-│  • Deduplication            │              │  • Token Budget Enforcement    │
-│  • Verification             │              │  • Credential Management       │
-│  • Entity Resolution        │              │  • Prompt Inspection           │
-│  • Conflict Resolution      │              │  • Response Filtering          │
-│  • Persistence              │              │  • Cost Attribution            │
-└────────┬────────────────────┘              └────────────────────────────────┘
-         │
-┌────────▼────────────────────────────────────────────────────────────────────┐
-│                     AI SAFETY & GUARDRAILS LAYER                             │
-│                                                                             │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐  ┌─────────────────┐  │
-│  │   INPUT     │  │   RUNTIME    │  │   OUTPUT    │  │   GOVERNANCE    │  │
-│  │ GUARDRAILS  │  │ GUARDRAILS   │  │ GUARDRAILS  │  │   & COMPLIANCE  │  │
-│  │             │  │              │  │             │  │                 │  │
-│  │• Prompt     │  │• NeMo        │  │• Halluc.    │  │• EU AI Act     │  │
-│  │  Injection  │  │  Guardrails  │  │  Detection  │  │  Audit Trail   │  │
-│  │• PII Scan   │  │• Token       │  │• PII Leak   │  │• GDPR DPA      │  │
-│  │• Topic      │  │  Limits      │  │  Detection  │  │• SOC 2 Controls│  │
-│  │  Boundary   │  │• Latency     │  │• Factuality │  │• Model Cards   │  │
-│  │• Jailbreak  │  │  Budgets     │  │  Scoring    │  │• Risk Register │  │
-│  │  Detection  │  │• Circuit     │  │• Format     │  │• Consent Mgmt  │  │
-│  │             │  │  Breakers    │  │  Validation │  │• Data Lineage  │  │
-│  └─────────────┘  └──────────────┘  └─────────────┘  └─────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
-         │
-┌────────▼────────────────────────────────────────────────────────────────────┐
-│                     DATA & MEMORY LAYER                                      │
-│                                                                             │
-│  PostgreSQL 16    │ Qdrant v1.12  │ Neo4j 5.24    │ Redis 7               │
-│  + pgvector       │ (Vectors)     │ (Graph)       │ (Cache + Broker)      │
-│  + RLS            │               │ + APOC + GDS  │                       │
-│                   │               │               │                       │
-│  MinIO (S3)       │ Kafka (KRaft) │ Elasticsearch │ ClickHouse            │
-│  (Object Store)   │ (Events)      │ (Search)      │ (Analytics/OLAP)     │
-└─────────────────────────────────────────────────────────────────────────────┘
-         │
-┌────────▼────────────────────────────────────────────────────────────────────┐
-│                     OBSERVABILITY & AI MONITORING LAYER                      │
-│                                                                             │
-│  OpenTelemetry (GenAI Semantic Conventions)                                 │
-│  Langfuse (LLM Tracing + Evals) │ Grafana (Dashboards) │ PagerDuty        │
-│  Prometheus (Metrics)           │ Jaeger (Traces)       │ Sentry (Errors)  │
-│  AI Audit Log (Immutable)       │ Cost Analytics        │ Drift Detection  │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  FRONTEND — Next.js 15 · TypeScript · TanStack Query · Zustand       │
+│  Kanban board · meetings · team · admin · compliance dashboards      │
+│  Dev auth: auto-minted local JWT · Prod: Clerk RS256/JWKS            │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │ REST + WebSocket (Redis pub/sub fanout across workers)
+┌───────────────▼──────────────────────────────────────────────────────┐
+│  API — FastAPI                                                       │
+│  JWT auth middleware → verified tenant context on every request      │
+│  Rate limiting (429 w/ Retry-After) · security headers               │
+│  Webhooks: per-tenant HMAC verification                              │
+└───────┬───────────────────────────────────────────┬──────────────────┘
+        │                                           │
+┌───────▼────────────────┐            ┌─────────────▼──────────────────┐
+│  CELERY WORKERS        │            │  AI PIPELINE (LangGraph)       │
+│  queues: asr,          │───────────▶│ chunking → extraction → dedup  │
+│  extraction,           │            │ → verification (faithfulness)  │
+│  integrations, celery  │            │ → entity resolution → persist  │
+└───────┬────────────────┘            │ HITL interrupts + resume       │
+        │                             └─────────────┬──────────────────┘
+┌───────▼────────────────┐                          │
+│  Deepgram Nova-2 ASR   │            ┌─────────────▼──────────────────┐
+│  Presidio PII redaction│◀───────────│ LLM calls via LiteLLM client   │
+│  (pre-storage/pre-LLM) │            │ budgets(Redis) · circuit brkr  │
+└────────────────────────┘            └────────────────────────────────┘
+
+DATA: PostgreSQL16+pgvector (Prisma, RLS-ready) · Qdrant · Neo4j · Redis · MinIO
+OBSERVABILITY: OpenTelemetry GenAI spans · Langfuse (optional)
+CHECKPOINTS: Postgres-backed LangGraph saver (HITL survives restarts)
 ```
+
+**Deliberately absent:** Kong/NGINX edge, Elasticsearch, ClickHouse, Jaeger,
+Sentry, PagerDuty, Helm charts. These are roadmap items, not implemented —
+the previous README listed them as if they existed.
 
 ---
 
-## Tech Stack (Enterprise)
+## Tech Stack (as built)
 
 | Layer | Technology |
 |-------|-----------|
-| **ASR** | Deepgram Nova-2 (speaker diarization, word-level timestamps) |
-| **LLM Gateway** | LiteLLM Proxy (Groq, OpenAI, Anthropic, Cohere — 100+ providers) |
-| **LLM Extraction** | Llama 3.3 70B / GPT-4o / Claude Sonnet 4 via Gateway |
-| **Verification** | Anti-hallucination guardrail (faithfulness/hallucination/completeness) |
-| **Guardrails** | NVIDIA NeMo Guardrails (Colang policies) + custom 3-layer |
-| **Entity Resolution** | Neo4j graph traversal + rapidfuzz fuzzy matching |
-| **PII Redaction** | Microsoft Presidio (analyzer + anonymizer) |
-| **Database** | PostgreSQL 16 + pgvector, Row-Level Security |
-| **Vector Store** | Qdrant v1.12 (semantic caching, embeddings) |
-| **Graph DB** | Neo4j 5.24 Enterprise (APOC + GDS) |
-| **Message Queue** | Apache Kafka (KRaft mode) |
-| **Task Queue** | Celery + Redis |
-| **Object Storage** | MinIO (S3-compatible) |
-| **Backend** | FastAPI, Prisma ORM, Pydantic v2 |
-| **Frontend** | Next.js 15, TypeScript, shadcn/ui, TanStack Query, Zustand |
-| **Auth** | Clerk (JWT) + RBAC/ABAC middleware |
-| **Secrets** | HashiCorp Vault / AWS Secrets Manager |
-| **Observability** | OpenTelemetry GenAI, Langfuse, Prometheus, Grafana, Jaeger |
-| **Integrations** | Jira, Asana, Linear, Slack, GitHub, Salesforce, Notion, Teams (adapter pattern) |
-
----
+| **ASR** | Deepgram Nova-2 (diarization, word-level timestamps) |
+| **LLM** | Groq Llama-3.3-70B primary · GPT-4o fallback (LiteLLM client; optional LiteLLM proxy via `LLM_GATEWAY_URL`) |
+| **Pipeline** | LangGraph 0.2 — chunking → extraction → dedup → grounded verification → entity resolution → persistence |
+| **Verification** | Guardrails engine: faithfulness scoring, hallucination detection, contradiction & deadline-conflict detection, HITL routing |
+| **PII redaction** | Microsoft Presidio (applied before storage and before any LLM call) |
+| **Entity resolution** | Neo4j graph traversal + rapidfuzz fuzzy matching |
+| **Database** | PostgreSQL 16 + pgvector via Prisma; RLS policies provided (`infrastructure/docker/rls-setup.sql`) |
+| **Vector store** | Qdrant (semantic cache — real embeddings when `OPENAI_API_KEY` set, exact-match otherwise) |
+| **Graph DB** | Neo4j 5.24 community |
+| **Task queue** | Celery (queues: `asr`, `extraction`, `integrations`) — single orchestrator |
+| **Events** | Kafka bus, publish-only (HITL/webhook notifications); Redis pub/sub for WebSocket fanout |
+| **Object storage** | MinIO (durable bucket/object refs; presigned URLs generated on demand) |
+| **Backend** | FastAPI, Pydantic v2, Prisma (Python client) |
+| **Frontend** | Next.js 15, TypeScript, TanStack Query, Zustand, shadcn-style UI |
+| **Auth** | Clerk RS256/JWKS (production) or local HS256 dev tokens (`POST /auth/dev-token`, dev-only) |
+| **Observability** | OpenTelemetry GenAI spans; Langfuse optional |
 
 ## Quick Start
 
@@ -166,6 +128,17 @@ docker-compose up -d
 ### 6. Access Services
 | Service | URL |
 |---------|-----|
+| **Frontend Dashboard** | http://localhost:3000 (redirects to `/dashboard`) |
+| **API Docs (Swagger)** | http://localhost:8000/docs |
+| **MinIO Console** | http://localhost:9001 |
+| **Neo4j Browser** | http://localhost:7474 |
+| **Qdrant Dashboard** | http://localhost:6333/dashboard |
+| **Kafka UI** | http://localhost:8080 |
+
+Langfuse, Grafana and the LiteLLM proxy are optional integrations, not part
+of the default dev compose.
+
+---------|-----|
 | **Frontend Dashboard** | http://localhost:3000 |
 | **API Docs (Swagger)** | http://localhost:8000/docs |
 | **LLM Gateway** | http://localhost:4000 |
@@ -184,154 +157,74 @@ docker-compose up -d
 PraxisFlow/
 ├── backend/
 │   ├── app/
-│   │   ├── api/                      # FastAPI route handlers
-│   │   │   ├── v1/
-│   │   │   │   ├── meetings.py
-│   │   │   │   ├── tasks.py
-│   │   │   │   ├── transcripts.py
-│   │   │   │   ├── integrations.py
-│   │   │   │   ├── websocket.py
-│   │   │   │   ├── users.py
-│   │   │   │   ├── metrics.py
-│   │   │   │   ├── admin.py          # Tenant admin endpoints
-│   │   │   │   ├── compliance.py     # DSRs, exports, audit logs
-│   │   │   │   └── webhooks.py       # Inbound webhook handlers
-│   │   │   └── deps.py
-│   │   ├── agents/                   # LangGraph AI pipeline
-│   │   │   ├── extraction_graph.py   # 7-node pipeline
-│   │   │   ├── graph_runner.py
-│   │   │   ├── entity_resolution.py
-│   │   │   ├── schemas.py
-│   │   │   └── conflict_resolution.py
-│   │   ├── gateway/                  # LLM Gateway client
-│   │   │   ├── client.py
-│   │   │   ├── routing.py
-│   │   │   ├── budgets.py
-│   │   │   ├── caching.py
-│   │   │   └── circuit_breaker.py
-│   │   ├── guardrails/               # AI Safety (3-layer)
-│   │   │   ├── input_guardrails.py
-│   │   │   ├── runtime_guardrails.py
-│   │   │   ├── output_guardrails.py
-│   │   │   ├── manager.py
-│   │   │   ├── base.py
-│   │   │   └── config/
-│   │   ├── observability/            # OTel GenAI + Langfuse
-│   │   │   ├── otel.py
-│   │   │   ├── langfuse.py
-│   │   │   ├── audit_log.py
-│   │   │   └── main.py
-│   │   ├── security/                 # RBAC/ABAC + Secrets
-│   │   │   ├── rbac.py
-│   │   │   ├── abac.py
-│   │   │   ├── opa_client.py
-│   │   │   ├── secrets.py
-│   │   │   ├── encryption.py
-│   │   │   └── middleware.py
-│   │   ├── compliance/               # GDPR, EU AI Act
-│   │   │   ├── gdpr.py
-│   │   │   ├── eu_ai_act.py
-│   │   │   └── model_cards.py
-│   │   ├── integrations/             # External tool adapters
-│   │   │   ├── factory.py
-│   │   │   ├── base.py
-│   │   │   ├── jira.py
-│   │   │   ├── asana.py
-│   │   │   ├── linear.py
-│   │   │   ├── slack.py
-│   │   │   ├── github.py
-│   │   │   ├── salesforce.py
-│   │   │   └── teams.py
-│   │   ├── services/
-│   │   ├── workers/
-│   │   └── core/
-│   ├── prisma/schema.prisma          # 18+ models, 10+ enums
-│   └── tests/
-├── frontend/
-│   ├── app/dashboard/
-│   │   ├── compliance/               # Compliance dashboard
-│   │   ├── admin/                    # Tenant admin panel
-│   │   └── ...other pages
-├── llm-gateway/                      # LiteLLM Proxy service
-│   ├── litellm_config.yaml
-│   ├── routing_policies.yaml
-│   └── Dockerfile
-├── guardrails/                       # NeMo Colang policies
-│   ├── colang/
-│   └── config/
-├── infrastructure/
-│   ├── docker/
-│   ├── k8s/                          # Kubernetes manifests
-│   ├── terraform/                    # IaC
-│   └── helm/
-├── .github/workflows/                # CI/CD pipelines
-│   ├── ci.yml
-│   ├── deploy-staging.yml
-│   └── deploy-production.yml
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── COMPLIANCE.md
-│   └── SECURITY.md
-├── docker-compose.yml                # Dev stack (12 services)
-├── docker-compose.prod.yml           # Production stack (18 services)
-├── Makefile                          # Developer commands
-└── .env.example
+│   │   ├── api/                    # FastAPI routers
+│   │   │   ├── meetings.py  tasks.py  transcripts.py
+│   │   │   ├── integrations.py  webhooks.py  users.py
+│   │   │   ├── metrics.py  admin.py  compliance.py
+│   │   │   └── auth.py             # dev-token endpoint (dev only)
+│   │   ├── agents/                 # LangGraph pipeline
+│   │   │   ├── extraction_graph.py graph_runner.py
+│   │   │   ├── entity_resolution.py schemas.py
+│   │   │   └── checkpointer.py     # Postgres-backed HITL state
+│   │   ├── gateway/                # LLM client: budgets · cache · breaker
+│   │   ├── guardrails/             # input/runtime/output guardrails
+│   │   ├── observability/          # OTel GenAI · Langfuse (optional)
+│   │   ├── security/               # auth.py verifier · middleware · RBAC
+│   │   ├── services/               # asr · storage · pii_redaction · kafka_events
+│   │   ├── workers/                # celery_app · tasks · kafka_consumers*
+│   │   ├── db/prisma.py            # tenant_tx() RLS helper
+│   │   └── core/config.py
+│   ├── config/model_cards.json     # EU AI Act Art. 11 model cards
+│   ├── prisma/schema.prisma        # single source of truth for tables
+│   ├── scripts/{seed_dev.py, e2e_test.py}
+│   └── tests/                      # pytest incl. auth & gated RLS suites
+├── frontend/                       # Next.js 15 dashboard
+├── infrastructure/docker/          # init-postgres.sql · rls-setup.sql
+├── llm-gateway/                    # optional LiteLLM proxy service
+├── guardrails/                     # Colang policies (NeMo optional runtime)
+├── docs/COMPLIANCE.md              # risk register · DPIA outline
+├── docker-compose.yml              # dev stack
+├── docker-compose.prod.yml         # prod skeleton (monitoring configs pending)
+└── .github/workflows/ci.yml        # real CI: tests · typecheck · build
 ```
+`*` kafka_consumers is deprecated orchestration kept for reference.
 
----
+## Key Features (as built)
 
-## Key Enterprise Features
+### 1. Extraction pipeline
+- Deepgram Nova-2 ASR with diarization → **Presidio PII redaction before storage and LLM**
+- LangGraph: chunking → extraction (JSON-repair retry loop) → deduplication →
+  grounded verification → entity resolution (Neo4j + rapidfuzz, persisted to tasks)
+- Durable MinIO references — reprocessing never breaks on URL expiry
 
-### 1. LLM Gateway (Critical)
-- **Unified API** — Single OpenAI-compatible endpoint for 100+ providers
-- **Model Routing** — Cost-optimized: small models for classification, frontier for extraction
-- **Fallback Chains** — Groq → OpenAI → Anthropic → Azure (per-task configurable)
-- **Semantic Caching** — Qdrant-backed, 20-40% cost reduction on repeated prompts
-- **Token Budgets** — Org → Tenant → User hierarchy with soft/hard/emergency limits
-- **Circuit Breakers** — Per-provider health monitoring, auto-isolation
-- **Cost Attribution** — Per-tenant, per-meeting, per-pipeline-node billing
+### 2. Verification & human-in-the-loop
+- Faithfulness scoring against transcript; failures route to review, never auto-approve
+- Contradiction + deadline-conflict detection across extraction runs
+- HITL interrupts with a **Postgres-persisted** checkpointer: resume survives restarts
 
-### 2. AI Safety & Guardrails (3-Layer)
-| Layer | Components |
-|-------|------------|
-| **Input** | Prompt injection detection (Lakera/custom), PII redaction (Presidio), topic boundaries, jailbreak patterns, length limits, tenant isolation |
-| **Runtime** | NeMo Guardrails (Colang), token limits, temperature locks, latency budgets, circuit breakers, structured output enforcement |
-| **Output** | Hallucination detection (faithfulness ≥0.7), PII leak scanning, format validation (Pydantic), confidence thresholds → human review, contradiction detection, content policy |
+### 3. Security & tenancy
+- Clerk RS256/JWKS in production · local HS256 dev tokens (endpoint hidden outside dev)
+- Every query tenant-scoped from verified identity; client-supplied tenant inputs removed
+- RLS policies + restricted role ready (`rls-setup.sql`), `tenant_tx()` binds context per transaction
+- Production refuses to boot with default secrets
 
-### 3. Human-in-the-Loop (HITL)
-| Confidence | Action | SLA |
-|------------|--------|-----|
-| ≥ 0.90 | Auto-approve → ASSIGNED | Immediate |
-| 0.70–0.89 | Queue for review | < 4 hours |
-| 0.50–0.69 | Flag + highlight | < 2 hours |
-| < 0.50 | Reject + re-extract | Immediate |
-| Contradiction | Block + notify owner | < 1 hour |
-| PII in output | Block + redact + alert | Immediate |
+### 4. Reliability & scale
+- Redis token budgets shared across workers · circuit breaker on LLM providers
+- WebSocket fanout via Redis pub/sub (works with multiple uvicorn workers)
+- Celery is the single orchestrator; Kafka bus is publish-only for notifications
 
-### 4. Multi-Tenant Security (Zero Trust)
-- **Network**: Per-tenant API keys, X-Tenant-ID headers, mTLS
-- **Application**: Middleware extracts tenant from JWT, enforces scoping
-- **Data**: PostgreSQL RLS + per-tenant encryption keys, Neo4j partitions, MinIO IAM
-- **AI**: Per-tenant token budgets, model access policies, no cross-tenant context
-- **Audit**: Per-tenant immutable audit logs, self-service compliance export
-
-### 5. Full Observability
-- **OpenTelemetry GenAI** — Every LLM call traced with semantic conventions
-- **Langfuse** — Prompt/response tracing, evals, cost attribution, prompt versioning
-- **Prometheus + Grafana** — Latency, throughput, error rates, token usage
-- **AI Audit Log** — Immutable, cryptographically signed, 7-year retention
-
-### 6. Compliance & Governance (Native)
-| Regulation | Implementation |
-|------------|----------------|
-| **EU AI Act (Aug 2, 2026)** | Risk register, model cards, technical docs, immutable audit log, HITL, continuous evals, pen testing |
-| **GDPR** | PII redaction pre-LLM, purpose limitation, cascade delete, portability export, DPAs, 72h breach notification, EU data residency |
-| **SOC 2 Type II** | RBAC/ABAC, automated access reviews, real-time monitoring, change management, multi-AZ, processing integrity |
-| **ISO 27001** | Aligned controls across all domains |
-
----
+### 5. Honest compliance surfaces
+- GDPR: real DSR + export records, cascade erase, portability
+- EU AI Act Art. 11 model cards from versioned config; status endpoints report
+  implemented controls vs. open gaps — certifications reported as not held
+- Metrics are live DB aggregates only
 
 ## API Endpoints (v1)
+
+### Auth
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/auth/dev-token` | Dev-only local JWT minting (404s outside development / when Clerk configured) |
 
 ### Meetings
 | Method | Endpoint | Description |
@@ -393,8 +286,8 @@ PraxisFlow/
 ### Optional (Production)
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `VAULT_ADDR` | HashiCorp Vault address | — |
-| `VAULT_TOKEN` | Vault authentication token | — |
+| `VAULT_ADDR` | HashiCorp Vault address *(code stub exists; not wired)* | — |
+| `VAULT_TOKEN` | Vault authentication token *(code stub exists; not wired)* | — |
 | `AWS_REGION` | AWS region for Secrets Manager | `us-east-1` |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key | — |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key | — |
@@ -452,40 +345,35 @@ make security-scan
 
 ## Production Deployment
 
-### Required Infrastructure
-- PostgreSQL 16+ with pgvector (RDS / Cloud SQL)
-- Qdrant (managed or self-hosted)
-- Neo4j Enterprise 5.24+ (Aura / self-hosted)
-- Kafka 3.8+ (MSK / Confluent Cloud)
-- Redis 7+ (ElastiCache / self-hosted)
-- S3-compatible object storage
-- Kubernetes (EKS / GKE / AKS) for orchestration
+> **Honest status:** the application layer is production-shaped (real auth,
+> tenant scoping, persistent checkpoints, Redis-backed budgets/WS fanout),
+> but deployment automation is not built yet.
 
-### Security Features
-- TLS 1.3 for all connections
-- Row-Level Security for multi-tenant isolation (apply `infrastructure/docker/rls-setup.sql` after `prisma db push`; connect as the restricted `praxisflow_app` role)
-- JWT authentication via Clerk (RS256/JWKS) or local HS256 in dev; production refuses default secrets
-- Tenant scoping enforced on every query; RLS context bound per transaction via `tenant_tx()`
-- PII redaction at ingestion (Presidio)
-- Webhook signature verification (HMAC-SHA256, multi-tenant secret matching)
-- AI audit logging for every LLM decision
-- HashiCorp Vault / AWS Secrets Manager for secrets
+What exists today:
+- `docker-compose.prod.yml` — a starting point; several monitoring services
+  reference config files that still need to be authored
+  (`infrastructure/{otel,prometheus,grafana,nginx}`).
+- RLS policies ready to apply (`infrastructure/docker/rls-setup.sql`).
+- Production config guard: the API refuses to boot with default secrets
+  (`settings.validate_security_settings()`).
 
-### Deployment
-```bash
-# Build images
-docker compose -f docker-compose.prod.yml build
+What does NOT exist yet (do not assume otherwise):
+- Kubernetes manifests / Helm charts / Terraform
+- Staging & production CI/CD pipelines (deploy workflows were removed until
+  real targets exist)
+- Managed-service provisioning docs
 
-# Deploy to Kubernetes
-kubectl apply -k infrastructure/k8s/production
+Minimum viable production path:
+1. Managed Postgres (apply `prisma db push`, then `rls-setup.sql`; connect as
+   restricted `praxisflow_app` role)
+2. Set strong `JWT_SECRET` + configure Clerk keys (local auth auto-disables)
+3. `CHECKPOINTER_BACKEND=postgres`, Redis for budgets/WS relay
+4. Run API + Celery workers behind TLS-terminating proxy of your choice
 
-# Or use Terraform
-cd infrastructure/terraform/production && terraform apply
-```
+## Cost Estimates (1,000 meetings/month — rough vendor list pricing)
 
----
-
-## Cost Estimates (1,000 meetings/month, Production)
+> Disclaimer: back-of-envelope list prices for planning only. Not measured,
+> not negotiated, and excludes observability vendors listed in the roadmap.
 
 | Service | Monthly Cost | Notes |
 |---------|-------------|-------|

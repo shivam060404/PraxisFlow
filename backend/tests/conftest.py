@@ -272,27 +272,43 @@ def async_mock_context(return_value):
 # ─── Patch Fixtures ───
 
 @pytest.fixture(autouse=True)
-def mock_settings():
-    """Mock settings for tests."""
-    with patch("app.core.config.settings") as mock:
-        mock.ENVIRONMENT = "test"
-        mock.DATABASE_URL = "postgresql://test:test@localhost:5432/test"
-        mock.GROQ_API_KEY = "test-groq-key"
-        mock.OPENAI_API_KEY = "test-openai-key"
-        mock.DEEPGRAM_API_KEY = "test-deepgram-key"
-        mock.JWT_SECRET = "test-secret"
-        mock.NEO4J_URI = "bolt://localhost:7687"
-        mock.NEO4J_USER = "neo4j"
-        mock.NEO4J_PASSWORD = "test"
-        mock.QDRANT_URL = "http://localhost:6333"
-        mock.REDIS_URL = "redis://localhost:6379"
-        mock.KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
-        mock.EXTRACTION_MODEL = "llama-3.3-70b-versatile"
-        mock.VERIFICATION_MODEL = "llama-3.3-70b-versatile"
-        mock.EMBEDDING_MODEL = "text-embedding-3-large"
-        mock.CHUNK_SIZE = 2000
-        mock.CHUNK_OVERLAP = 200
-        yield mock
+def mock_settings(monkeypatch):
+    """
+    Patch individual settings for tests.
+
+    IMPORTANT: this deliberately does NOT replace the settings object with a
+    MagicMock. Modules that import `settings` lazily (during a test) must see
+    a real Settings instance — a mock object makes optional attrs like
+    CLERK_SECRET_KEY truthy and flips security code paths unpredictably.
+    """
+    from app.core.config import settings
+
+    overrides = {
+        "ENVIRONMENT": "development",
+        "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
+        "GROQ_API_KEY": "test-groq-key",
+        "OPENAI_API_KEY": "test-openai-key",
+        "DEEPGRAM_API_KEY": "test-deepgram-key",
+        "JWT_SECRET": "test-secret",
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": "test",
+        "QDRANT_URL": "http://localhost:6333",
+        "REDIS_URL": "redis://localhost:6379",
+        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
+        "EXTRACTION_MODEL": "llama-3.3-70b-versatile",
+        "VERIFICATION_MODEL": "llama-3.3-70b-versatile",
+        "EMBEDDING_MODEL": "text-embedding-3-large",
+        "CHUNK_SIZE": 2000,
+        "CHUNK_OVERLAP": 200,
+        # Security-relevant: keep auth in local mode unless a test opts out
+        "CLERK_SECRET_KEY": None,
+        "CLERK_ISSUER": None,
+        "CLERK_JWKS_URL": None,
+    }
+    for attr, value in overrides.items():
+        monkeypatch.setattr(settings, attr, value, raising=False)
+    yield
 
 
 # ─── Test Markers ───

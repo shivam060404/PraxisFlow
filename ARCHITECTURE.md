@@ -1,4 +1,10 @@
 # PraxisFlow — Architecture Document v2.0
+
+> ⚠️ **Document status:** this describes the *target* architecture. The
+> **as-built** reference is README.md ("Architecture — as built"). Components
+> marked below that are not in the README as-built diagram (Kong/NGINX edge,
+> Elasticsearch, ClickHouse, Jaeger, Sentry, PagerDuty) are roadmap items.
+
 # Enterprise AI Meeting Intelligence Platform
 # Last Updated: July 2026 | Classification: Internal
 

@@ -106,7 +106,6 @@ export default function MeetingsPage() {
     if (uploadForm.duration_minutes) {
       formData.append("duration_minutes", uploadForm.duration_minutes);
     }
-    formData.append("tenant_id", "00000000-0000-0000-0000-000000000001");
 
     uploadMutation.mutate(formData);
   };

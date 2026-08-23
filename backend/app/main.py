@@ -85,11 +85,9 @@ async def lifespan(app: FastAPI):
     await guardrails_manager.initialize()
     logger.info("Guardrails initialized")
     
-    # Initialize Kafka consumers
-    try:
-        await startup_kafka()
-    except Exception as e:
-        logger.error(f"Failed to start Kafka consumers: {e}")
+    # NOTE: Kafka consumers are intentionally NOT started here.
+    # Celery is the single orchestrator; the bus is publish-only
+    # (HITL / webhook notification events).
 
     # Start the cross-instance WebSocket relay (Redis pub/sub)
     import asyncio as _asyncio
@@ -121,7 +119,7 @@ async def lifespan(app: FastAPI):
     from app.agents.checkpointer import close_checkpointer
 
     await close_checkpointer()
-    await shutdown_kafka()
+    # shutdown_kafka() not needed: consumers are not started anymore
     await close_prisma()
     shutdown_observability()
     
@@ -301,7 +299,7 @@ async def liveness_check():
 
 # ─── API Routes ───
 
-from app.api import meetings, tasks, transcripts, integrations, websocket, users, metrics, admin, compliance, webhooks
+from app.api import meetings, tasks, transcripts, integrations, websocket, users, metrics, admin, compliance, webhooks, auth
 
 app.include_router(meetings.router, prefix=settings.API_V1_PREFIX)
 app.include_router(tasks.router, prefix=settings.API_V1_PREFIX)
@@ -313,6 +311,7 @@ app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin.router, prefix=settings.API_V1_PREFIX)
 app.include_router(compliance.router, prefix=settings.API_V1_PREFIX)
 app.include_router(webhooks.router, prefix=settings.API_V1_PREFIX)
+app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 
 
 # ─── Root ───

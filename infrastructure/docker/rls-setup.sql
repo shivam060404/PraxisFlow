@@ -55,18 +55,26 @@ CREATE OR REPLACE FUNCTION current_tenant_id() RETURNS text AS $$
     SELECT COALESCE(current_setting('app.current_tenant', true), '');
 $$ LANGUAGE sql STABLE;
 
--- ─── 3. Enable + FORCE RLS on all tenant-scoped tables ─────────────────────
+-- ─── 3. Enable RLS on all tenant-scoped tables ─────────────────────────────
+-- ENABLE only (no FORCE): the table OWNER (migration/seed role) keeps
+-- bypass so dev flows and `prisma db push` work unchanged. Every NON-owner
+-- role — i.e. `praxisflow_app`, the intended runtime identity — is fully
+-- constrained by the policies below.
+--
+-- If you want zero-bypass hardening later, apply FORCE per table knowing
+-- that ALL roles then require `SET app.current_tenant` first.
 DO $$
 DECLARE
     t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY[
         'Tenant', 'User', 'Meeting', 'Task', 'Integration', 'AiAuditLog',
-        'DataSubjectRequest', 'ComplianceExport'
+        'DataSubjectRequest', 'ComplianceExport',
+        -- child tables: scoped through parent-relation policies
+        'Transcript', 'Utterance', 'Attendee', 'MeetingFlag', 'TaskAuditLog'
     ]
     LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
     END LOOP;
 END
 $$;
