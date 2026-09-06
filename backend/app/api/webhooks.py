@@ -18,13 +18,13 @@ from pydantic import BaseModel
 from app.db.prisma import get_prisma
 from app.integrations.factory import IntegrationAdapterFactory
 from app.security import require_permission, Permission
-from app.agents.graph_runner import (
+from app.ai.agents.graph_runner import (
     resume_extraction_pipeline_wrapper,
     check_pipeline_status,
     create_hitl_approval_feedback,
     create_hitl_modification_feedback,
 )
-from app.agents.schemas import HITLPayload
+from app.ai.agents.schemas import HITLPayload
 
 logger = logging.getLogger(__name__)
 

@@ -87,7 +87,7 @@ class TestExtractionSchemas:
     """Test extraction Pydantic schemas."""
     
     def test_extracted_task_schema(self):
-        from app.agents.schemas import ExtractedTask
+        from app.ai.agents.schemas import ExtractedTask
         
         task = ExtractedTask(
             task_type="ACTION_ITEM",
@@ -107,7 +107,7 @@ class TestExtractionSchemas:
         assert task.assignee_hint == "Sarah from finance"
     
     def test_extraction_result_schema(self):
-        from app.agents.schemas import ExtractionResult, ExtractedTask
+        from app.ai.agents.schemas import ExtractionResult, ExtractedTask
         
         tasks = [
             ExtractedTask(
@@ -183,7 +183,7 @@ class TestEntityResolution:
     
     @pytest.mark.asyncio
     async def test_extract_role_hint(self):
-        from app.agents.entity_resolution import EntityResolutionAgent
+        from app.ai.agents.entity_resolution import EntityResolutionAgent
         
         agent = EntityResolutionAgent()
         
@@ -199,8 +199,8 @@ class TestChunking:
     """Test transcript chunking."""
     
     def test_chunk_transcript(self):
-        from app.agents.extraction_graph import chunking_node
-        from app.agents.schemas import ExtractionState, TranscriptChunk
+        from app.ai.agents.extraction_graph import chunking_node
+        from app.ai.agents.schemas import ExtractionState, TranscriptChunk
         
         # Create state with transcript chunks
         state = ExtractionState(
@@ -230,8 +230,8 @@ class TestDeduplication:
     """Test task deduplication."""
     
     def test_duplicate_detection(self):
-        from app.agents.extraction_graph import _tasks_similar
-        from app.agents.schemas import ExtractedTask
+        from app.ai.agents.extraction_graph import _tasks_similar
+        from app.ai.agents.schemas import ExtractedTask
         
         task1 = ExtractedTask(
             task_type="ACTION_ITEM",

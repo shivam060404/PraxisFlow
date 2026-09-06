@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     # RAG
     RAG_TOP_K: int = 10
     RAG_RECENCY_BOOST_DAYS: int = 30
+    RAG_COLLECTION_NAME: str = "meeting_intelligence"
+    RAG_ENABLED: bool = False
+    RAG_SCORE_THRESHOLD: float = 0.65
+    RAG_MAX_CONTEXT_CHARS: int = 12000
 
     # File Upload
     MAX_FILE_SIZE_MB: int = 500

@@ -6,13 +6,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
 
-from app.guardrails.base import (
+from app.ai.guardrails.base import (
     GuardrailAction,
     GuardrailLayer,
     GuardrailSeverity,
     GuardrailContext,
 )
-from app.guardrails.input_guardrails import (
+from app.ai.guardrails.input_guardrails import (
     PromptInjectionDetector,
     InputPIIScanner,
     TopicBoundaryGuard,
@@ -20,13 +20,13 @@ from app.guardrails.input_guardrails import (
     InputLengthValidator,
     TenantIsolationGuard,
 )
-from app.guardrails.runtime_guardrails import (
+from app.ai.guardrails.runtime_guardrails import (
     TokenLimitGuard,
     TemperatureLockGuard,
     CircuitBreakerGuard,
     StructuredOutputGuard,
 )
-from app.guardrails.output_guardrails import (
+from app.ai.guardrails.output_guardrails import (
     OutputPIIScanner,
     FormatValidator,
     HallucinationDetector,
@@ -434,7 +434,7 @@ class TestGuardrailsPipeline:
     @pytest.mark.asyncio
     async def test_full_input_pipeline(self, guardrail_context):
         """Test input guardrails run in sequence."""
-        from app.guardrails.input_guardrails import create_input_guardrails
+        from app.ai.guardrails.input_guardrails import create_input_guardrails
         
         pipeline = create_input_guardrails({
             "injection_detection": True,
@@ -456,7 +456,7 @@ class TestGuardrailsPipeline:
 
     @pytest.mark.asyncio
     async def test_input_pipeline_redacts_pii(self, guardrail_context):
-        from app.guardrails.input_guardrails import create_input_guardrails
+        from app.ai.guardrails.input_guardrails import create_input_guardrails
         
         pipeline = create_input_guardrails({"pii_scanning": True})
         
@@ -471,7 +471,7 @@ class TestGuardrailsPipeline:
 
     @pytest.mark.asyncio
     async def test_output_pipeline(self, guardrail_context):
-        from app.guardrails.output_guardrails import OutputGuardrailsRunner
+        from app.ai.guardrails.output_guardrails import OutputGuardrailsRunner
         
         runner = OutputGuardrailsRunner(
             schema_name="extraction",

@@ -37,7 +37,7 @@ db-reset: ## Reset database (WARNING: destroys data)
 	docker compose exec backend prisma migrate reset --force
 
 db-seed: ## Seed database with test data
-	docker compose exec backend python -m scripts.seed
+	docker compose exec backend python -m scripts.seed_dev
 
 # ─── Backend Commands ───
 backend-install: ## Install backend dependencies
@@ -47,7 +47,11 @@ backend-test: ## Run backend unit tests
 	cd backend && pytest tests/ -v --cov=app --cov-report=term-missing
 
 backend-test-integration: ## Run backend integration tests
-	cd backend && pytest tests/integration/ -v
+	@if find backend/tests/integration -name 'test_*.py' -print -quit | grep -q .; then \
+		cd backend && pytest tests/integration/ -v; \
+	else \
+		echo "No backend integration tests are present yet."; \
+	fi
 
 backend-test-watch: ## Run tests in watch mode
 	cd backend && pytest-watch tests/
@@ -96,7 +100,7 @@ gateway-build: ## Build LLM Gateway image
 	docker build -t praxisflow/llm-gateway:latest ./llm-gateway
 
 gateway-run: ## Run LLM Gateway locally
-	docker compose -f llm-gateway/docker-compose.yml up -d
+	docker compose -f docker-compose.yml --profile gateway up -d gateway
 
 gateway-test: ## Test LLM Gateway
 	curl -X POST http://localhost:4000/v1/chat/completions \
@@ -110,10 +114,10 @@ guardrails-test: ## Test guardrails
 
 # ─── Observability ───
 otel-run: ## Start OpenTelemetry collector
-	docker compose -f infrastructure/otel/docker-compose.yml up -d
+	@echo "OpenTelemetry deployment manifests are not configured yet."
 
 langfuse-run: ## Start Langfuse
-	docker compose -f infrastructure/langfuse/docker-compose.yml up -d
+	@echo "Langfuse deployment manifests are not configured yet."
 
 # ─── Full Test Suite ───
 test: backend-test frontend-test guardrails-test ## Run all tests
@@ -182,7 +186,7 @@ logs-worker: ## Follow worker logs
 	docker compose logs -f worker
 
 logs-gateway: ## Follow LLM Gateway logs
-	docker compose -f llm-gateway/docker-compose.yml logs -f
+	docker compose -f docker-compose.yml logs -f gateway
 
 # ─── Health Checks ───
 health: ## Check all service health
