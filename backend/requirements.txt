@@ -42,7 +42,7 @@ llama-index-vector-stores-qdrant>=0.4.0
 llama-index-graph-stores-neo4j>=0.3.0
 
 # Embeddings
-openai==2.54.0
+openai>=1.58.1,<2.0.0
 
 # PII Redaction
 presidio-analyzer==2.2.35
