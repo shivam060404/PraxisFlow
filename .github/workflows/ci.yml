@@ -50,7 +50,7 @@ jobs:
         env:
           ENVIRONMENT: test
           JWT_SECRET: ci-test-secret-not-used-in-prod-0123456789
-        run: pytest tests/ -q --ignore=tests/test_rls.py
+        run: python -m pytest tests/ -q --ignore=tests/test_rls.py
 
       # tests/test_rls.py self-skips without TEST_RLS_DATABASE_URL; the
       # explicit ignore keeps that contract obvious in CI logs.
