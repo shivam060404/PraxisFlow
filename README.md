@@ -158,36 +158,39 @@ PraxisFlow/
 ├── backend/
 │   ├── app/
 │   │   ├── api/                    # FastAPI routers
-│   │   │   ├── meetings.py  tasks.py  transcripts.py
-│   │   │   ├── integrations.py  webhooks.py  users.py
-│   │   │   ├── metrics.py  admin.py  compliance.py
-│   │   │   └── auth.py             # dev-token endpoint (dev only)
-│   │   ├── agents/                 # LangGraph pipeline
-│   │   │   ├── extraction_graph.py graph_runner.py
-│   │   │   ├── entity_resolution.py schemas.py
-│   │   │   └── checkpointer.py     # Postgres-backed HITL state
-│   │   ├── gateway/                # LLM client: budgets · cache · breaker
-│   │   ├── guardrails/             # input/runtime/output guardrails
-│   │   ├── observability/          # OTel GenAI · Langfuse (optional)
-│   │   ├── security/               # auth.py verifier · middleware · RBAC
-│   │   ├── services/               # asr · storage · pii_redaction · kafka_events
-│   │   ├── workers/                # celery_app · tasks · kafka_consumers*
-│   │   ├── db/prisma.py            # tenant_tx() RLS helper
-│   │   └── core/config.py
-│   ├── config/model_cards.json     # EU AI Act Art. 11 model cards
-│   ├── prisma/schema.prisma        # single source of truth for tables
-│   ├── scripts/{seed_dev.py, e2e_test.py}
-│   └── tests/                      # pytest incl. auth & gated RLS suites
-├── frontend/                       # Next.js 15 dashboard
-├── infrastructure/docker/          # init-postgres.sql · rls-setup.sql
-├── llm-gateway/                    # optional LiteLLM proxy service
-├── guardrails/                     # Colang policies (NeMo optional runtime)
-├── docs/COMPLIANCE.md              # risk register · DPIA outline
-├── docker-compose.yml              # dev stack
-├── docker-compose.prod.yml         # prod skeleton (monitoring configs pending)
-└── .github/workflows/ci.yml        # real CI: tests · typecheck · build
+│   │   ├── core/                   # settings, paths, shared runtime concerns
+│   │   ├── models/                 # persistence/domain model boundary
+│   │   ├── schemas/                # validated API and pipeline schemas
+│   │   ├── services/               # ASR, storage, PII, events
+│   │   ├── workers/                # Celery and Kafka orchestration
+│   │   ├── clients/llm_gateway/    # LLM gateway client and resilience
+│   │   ├── ai/
+│   │   │   ├── agents/              # LangGraph extraction agents
+│   │   │   ├── guardrails/         # input/runtime/output safety controls
+│   │   │   ├── llm/                # routing, budgets, cache, circuit breaker
+│   │   │   ├── prompts/            # typed, versioned prompt catalog
+│   │   │   ├── rag/                # chunking, embeddings, tenant-scoped Qdrant retrieval
+│   │   │   └── evaluation/         # extraction and verification pipeline
+│   │   └── security/, db/, observability/, integrations/
+│   ├── alembic/                    # reserved; Prisma is currently authoritative
+│   ├── prisma/schema.prisma        # current database source of truth
+│   ├── scripts/                    # backend-local operational scripts
+│   └── tests/                      # unit, guardrail, and integration tests
+├── frontend/                       # Next.js dashboard
+├── llm-gateway/
+│   ├── config/                     # LiteLLM and routing configuration
+│   ├── scripts/                    # gateway operations
+│   └── tests/                      # gateway contract tests
+├── infrastructure/                 # Docker assets and future K8s/Terraform
+├── tests/{integration,e2e,evaluation,load}/
+├── scripts/                        # repository-wide automation
+├── docs/                           # compliance and engineering documentation
+
+├── docker-compose*.yml              # development and production stacks
+└── .github/workflows/              # CI/CD automation
 ```
-`*` kafka_consumers is deprecated orchestration kept for reference.
+The legacy `agents`, `gateway`, and `guardrails` import paths remain as
+compatibility modules while new code uses `app.ai`.
 
 ## Key Features (as built)
 
@@ -398,4 +401,3 @@ Minimum viable production path:
 Proprietary — All rights reserved.
 
 ---
-

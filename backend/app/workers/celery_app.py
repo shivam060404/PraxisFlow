@@ -45,7 +45,7 @@ celery_app.conf.task_routes = {
 def init_worker(**kwargs):
     """Initialize per-process resources (DB + persistent checkpointer)."""
     import asyncio
-    from app.agents.checkpointer import init_checkpointer
+    from app.ai.agents.checkpointer import init_checkpointer
 
     try:
         asyncio.run(init_checkpointer())

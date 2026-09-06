@@ -11,8 +11,8 @@ from app.db.prisma import get_prisma
 from app.services.asr import transcribe_meeting
 from app.services.storage import storage_service
 from app.workers.celery_app import celery_app, async_task
-from app.agents.schemas import TranscriptChunk
-from app.agents.graph_runner import run_extraction_pipeline
+from app.ai.agents.schemas import TranscriptChunk
+from app.ai.agents.graph_runner import run_extraction_pipeline
 
 def run_async(coro):
     try:
@@ -282,8 +282,8 @@ async def _verify_task_async(task_id: str):
     reasoning = "No transcript available for grounding check; routed to human review."
 
     if transcript:
-        from app.guardrails.output_guardrails import HallucinationDetector
-        from app.guardrails.base import GuardrailAction, GuardrailContext
+        from app.ai.guardrails.output_guardrails import HallucinationDetector
+        from app.ai.guardrails.base import GuardrailAction, GuardrailContext
 
         detector = HallucinationDetector(enabled=True, faithfulness_threshold=0.7)
         context = GuardrailContext(tenant_id=task.tenantId, user_id="system", meeting_id=task.meetingId)

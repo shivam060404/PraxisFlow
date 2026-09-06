@@ -116,6 +116,7 @@ The LLM Gateway is the single mandatory path for ALL AI model interactions. No a
 | **Model Routing** | Policy-based routing rules | Cost-optimize: small models for classification, frontier for extraction |
 | **Fallback Chains** | Primary → Secondary → Tertiary | Groq → OpenAI → Anthropic → Azure (per-task configurable) |
 | **Semantic Cache** | Qdrant vector similarity | 20-40% cost reduction on repeated/similar prompts |
+| **Transcript RAG** | Versioned chunks + gateway embeddings + tenant-filtered Qdrant | Grounded verification with auditable evidence |
 | **Token Budgets** | Per-tenant, per-user, per-pipeline | Hard limits with graceful degradation |
 | **Prompt Inspection** | Pre-flight analysis layer | PII detection, injection detection, topic boundaries |
 | **Response Filtering** | Post-response validation | Hallucination flags, PII leaks, format compliance |
@@ -125,7 +126,7 @@ The LLM Gateway is the single mandatory path for ALL AI model interactions. No a
 ### 3.2 Model Routing Strategy
 
 ```yaml
-# llm_gateway/routing_policies.yaml
+# llm-gateway/config/routing_policies.yaml
 policies:
   extraction_pipeline:
     primary: groq/llama-3.3-70b-versatile
@@ -229,7 +230,7 @@ Layer 3: OUTPUT GUARDRAILS (Post-LLM)
 ### 4.2 NeMo Guardrails Configuration (Colang)
 
 ```colang
-# guardrails/extraction_policies.co
+# backend/app/ai/guardrails/colang/extraction_policies.co
 
 define flow extraction_scope
   user said something

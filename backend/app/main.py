@@ -17,7 +17,7 @@ from app.workers.kafka_consumers import startup_kafka, shutdown_kafka
 # ─── Enterprise Components ───
 from app.observability import init_observability, shutdown_observability, get_otel_logger, genai_tracer, LLMCallAttributes
 from app.observability.langfuse_client import init_langfuse, get_langfuse_client
-from app.guardrails.manager import guardrails_manager
+from app.ai.guardrails.manager import guardrails_manager
 from app.security import (
     TenantIsolationMiddleware,
     RateLimitMiddleware,
@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
     await get_prisma()
 
     # Persistent LangGraph checkpointer (HITL state survives restarts)
-    from app.agents.checkpointer import init_checkpointer, close_checkpointer
+    from app.ai.agents.checkpointer import init_checkpointer, close_checkpointer
 
     await init_checkpointer()
     
@@ -109,14 +109,14 @@ async def lifespan(app: FastAPI):
 
     # Release the gateway's Redis budget connection
     try:
-        from app.gateway.client import LLMGatewayClient
+        from app.clients.llm_gateway.client import LLMGatewayClient
 
         _gw = LLMGatewayClient()
         await _gw.budget_manager.close()
     except Exception:
         pass
 
-    from app.agents.checkpointer import close_checkpointer
+    from app.ai.agents.checkpointer import close_checkpointer
 
     await close_checkpointer()
     # shutdown_kafka() not needed: consumers are not started anymore

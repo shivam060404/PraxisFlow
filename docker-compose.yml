@@ -252,6 +252,28 @@ services:
     depends_on:
       - backend
 
+  # Optional LiteLLM gateway. Enable with: docker compose --profile gateway up
+  gateway:
+    profiles: ["gateway"]
+    build:
+      context: ./llm-gateway
+      dockerfile: Dockerfile
+    container_name: ami-llm-gateway
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-proxy-master-key-change-in-production}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      QDRANT_HOST: qdrant
+      REDIS_HOST: redis
+    ports:
+      - "4000:4000"
+    depends_on:
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   qdrant_data:

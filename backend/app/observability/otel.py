@@ -24,8 +24,6 @@ from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExp
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
 from opentelemetry.instrumentation.redis import RedisInstrumentor
-from opentelemetry.instrumentation.kafka import KafkaInstrumentor
-from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
 from opentelemetry.propagate import set_global_textmap
 from opentelemetry.propagators.b3 import B3MultiFormat
 from opentelemetry.propagators.composite import CompositePropagator
@@ -34,6 +32,16 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry.baggage.propagation import W3CBaggagePropagator
 
 from app.core.config import settings
+
+try:
+    from opentelemetry.instrumentation.kafka import KafkaInstrumentor
+except ImportError:
+    KafkaInstrumentor = None
+
+try:
+    from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
+except ImportError:
+    Psycopg2Instrumentor = None
 
 # GenAI Semantic Convention Attributes
 GENAI_SYSTEM = "gen_ai.system"
@@ -167,15 +175,17 @@ class OTELManager:
         except Exception:
             pass
 
-        try:
-            KafkaInstrumentor().instrument()
-        except Exception:
-            pass
+        if KafkaInstrumentor is not None:
+            try:
+                KafkaInstrumentor().instrument()
+            except Exception:
+                pass
 
-        try:
-            Psycopg2Instrumentor().instrument()
-        except Exception:
-            pass
+        if Psycopg2Instrumentor is not None:
+            try:
+                Psycopg2Instrumentor().instrument()
+            except Exception:
+                pass
 
     def shutdown(self):
         """Shutdown providers gracefully."""

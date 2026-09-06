@@ -40,7 +40,7 @@ jobs:
 
       - name: Generate Prisma client
         env:
-          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          DATABASE_URL: postgresql://ami:ami_dev_password@localhost:5432/ci
         run: prisma generate
 
       # Prisma client generation requires the schema to validate; DATABASE_URL

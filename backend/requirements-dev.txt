@@ -1,5 +1,2 @@
-# Additional test dependencies
-pytest-asyncio==0.23.7
-pytest-mock==3.14.0
-httpx==0.27.2
-fakeredis==2.20.1
+# Development dependencies are kept in requirements.txt so CI and local
+# environments resolve one consistent, tested set of versions.

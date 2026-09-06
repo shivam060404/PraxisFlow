@@ -35,8 +35,8 @@ WORKDIR /app
 COPY --from=builder /root/.local /home/litellm/.local
 
 # Copy configuration
-COPY litellm_config.yaml /app/litellm_config.yaml
-COPY routing_policies.yaml /app/routing_policies.yaml
+COPY config/litellm_config.yaml /app/litellm_config.yaml
+COPY config/routing_policies.yaml /app/routing_policies.yaml
 
 # Create directories for logs and cache
 RUN mkdir -p /app/logs /app/cache && chown -R litellm:litellm /app
