@@ -107,16 +107,23 @@ class StorageService:
             raise
     
     async def delete_file(self, url: str) -> bool:
-        """Delete a file by its URL."""
+        """Delete a durable ``bucket/object`` reference or a legacy URL."""
         try:
-            # Parse bucket and object name from URL
-            # URL format: http://endpoint/bucket/object_name
-            parts = url.split("/")
-            if len(parts) >= 4:
-                bucket = parts[3]
-                object_name = "/".join(parts[4:])
-                self.client.remove_object(bucket, object_name)
-                return True
+            if not url:
+                return False
+            if url.startswith(("http://", "https://")):
+                # URL format: http(s)://endpoint/bucket/object_name
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                parts = parsed.path.lstrip("/").split("/", 1)
+            else:
+                # New durable references are independent of the endpoint.
+                parts = url.split("/", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                logger.warning("Invalid storage reference: %s", url)
+                return False
+            self.client.remove_object(parts[0], parts[1])
+            return True
         except S3Error as e:
             logger.error(f"MinIO delete error: {e}")
         return False

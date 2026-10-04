@@ -30,6 +30,26 @@ class PIIRedactionService:
                 ],
             )
         )
+        self.analyzer.registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="MEDICAL_RECORD_NUMBER",
+                patterns=[Pattern(
+                    name="medical_record_number",
+                    regex=r"\b(?:MRN|medical record(?: number)?)\s*[:#-]?\s*[A-Z0-9-]{5,}\b",
+                    score=0.75,
+                )],
+            )
+        )
+        self.analyzer.registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="MEDICAL_LICENSE",
+                patterns=[Pattern(
+                    name="medical_license",
+                    regex=r"\b(?:NPI|license number|licence number)\s*[:#-]?\s*[A-Z0-9-]{5,}\b",
+                    score=0.7,
+                )],
+            )
+        )
         
         # Entities to redact.
         # NOTE: DATE_TIME is intentionally excluded — dates/times carry
@@ -39,6 +59,7 @@ class PIIRedactionService:
             "CREDIT_CARD", "US_SSN", "US_BANK_NUMBER",
             "US_PASSPORT", "LOCATION",
             "IP_ADDRESS", "URL", "CRYPTO", "IBAN_CODE",
+            "MEDICAL_LICENSE", "MEDICAL_RECORD_NUMBER",
         ]
         
         # Custom operators for different entity types

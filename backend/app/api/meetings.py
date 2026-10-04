@@ -8,6 +8,7 @@ from app.db.prisma import get_db, prisma_context
 from app.schemas import (
     Meeting, MeetingCreate, MeetingUpdate, MeetingStatus,
     Attendee, AttendeeCreate,
+    MeetingCapture, MeetingCaptureCreate,
     PaginatedResponse, ErrorResponse, to_prisma_data
 )
 from app.core.config import settings
@@ -38,6 +39,58 @@ async def create_meeting(
         }
     )
     return meeting
+
+
+@router.post("/{meeting_id}/capture", response_model=MeetingCapture, status_code=status.HTTP_201_CREATED)
+async def register_capture(
+    meeting_id: UUID,
+    capture_data: MeetingCaptureCreate,
+    subject: Subject = Depends(get_current_subject),
+    db=Depends(get_db),
+):
+    """Register a vendor bot after it has been scheduled externally."""
+    if capture_data.meeting_id != meeting_id:
+        raise HTTPException(status_code=400, detail="Meeting ID mismatch")
+
+    meeting = await db.meeting.find_first(
+        where={"id": str(meeting_id), "tenantId": subject.tenant_id}
+    )
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    capture = await db.meetingcapture.create(
+        data={
+            "tenantId": subject.tenant_id,
+            "meetingId": str(meeting_id),
+            "provider": capture_data.provider.value,
+            "externalBotId": capture_data.external_bot_id,
+            "webhookSecret": capture_data.webhook_secret,
+            "status": "SCHEDULED",
+        }
+    )
+    await db.meeting.update(
+        where={"id": str(meeting_id)},
+        data={"status": "SCHEDULED", "recordingSource": capture_data.provider.value},
+    )
+    return capture
+
+
+@router.post("/{meeting_id}/consent", response_model=Meeting)
+async def record_recording_consent(
+    meeting_id: UUID,
+    subject: Subject = Depends(get_current_subject),
+    db=Depends(get_db),
+):
+    """Record tenant-authorized consent before an ambient bot may join."""
+    meeting = await db.meeting.find_first(
+        where={"id": str(meeting_id), "tenantId": subject.tenant_id}
+    )
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return await db.meeting.update(
+        where={"id": str(meeting_id)},
+        data={"consentStatus": "granted"},
+    )
 
 
 @router.post("/upload", response_model=Meeting, status_code=status.HTTP_201_CREATED)

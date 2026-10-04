@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 # OS generated files
 .DS_Store
@@ -28,6 +29,7 @@ yarn-error.log
 out/
 build/
 dist/
+*.tsbuildinfo
 
 # Python
 __pycache__/
@@ -71,6 +73,10 @@ nosetests.xml
 coverage.xml
 *.cover
 *.py,cover
+test-results/
+playwright-report/
+blob-report/
+.playwright/
 
 # Docker volumes
 postgres_data/
@@ -83,6 +89,8 @@ minio_data/
 
 # Prisma
 /backend/prisma/dev.db
+/backend/node_modules/
+/backend/.prisma/
 
 # Celery
 celerybeat-schedule

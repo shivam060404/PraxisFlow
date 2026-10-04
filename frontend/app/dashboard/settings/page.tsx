@@ -48,6 +48,16 @@ export default function SettingsPage() {
     queryFn: () => api.getCurrentUserProfile(),
   });
 
+  const { data: tenantData } = useQuery({
+    queryKey: ["tenant"],
+    queryFn: () => api.getTenant(),
+  });
+
+  const { data: tenantUsage } = useQuery({
+    queryKey: ["tenant-usage"],
+    queryFn: () => api.getTenantUsage(),
+  });
+
   const [activeTab, setActiveTab] = React.useState("integrations");
   const [showAddIntegration, setShowAddIntegration] = React.useState(false);
   const [newIntegration, setNewIntegration] = React.useState({
@@ -61,6 +71,14 @@ export default function SettingsPage() {
     config: {} as Record<string, string>,
     status: "ACTIVE",
   });
+  const [calendarForm, setCalendarForm] = React.useState({
+    provider: "google" as "google" | "microsoft",
+    external_account: "",
+    access_token_ref: "",
+    refresh_token_ref: "",
+  });
+  const [calendarConnection, setCalendarConnection] = React.useState<any>(null);
+  const [calendarLoading, setCalendarLoading] = React.useState(false);
 
   const createIntegrationMutation = useMutation({
     mutationFn: (data: { provider: string; display_name: string; config: Record<string, unknown> }) => 
@@ -190,6 +208,20 @@ export default function SettingsPage() {
     testIntegrationMutation.mutate(id);
   };
 
+  const connectCalendar = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setCalendarLoading(true);
+    try {
+      const connection = await api.createCalendarConnection(calendarForm);
+      setCalendarConnection(connection);
+      toast.success("Calendar connection saved");
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || "Unable to save calendar connection");
+    } finally {
+      setCalendarLoading(false);
+    }
+  };
+
   return (
     <DashboardLayout>
       <div className="h-[calc(100vh-4rem)] flex flex-col">
@@ -210,6 +242,28 @@ export default function SettingsPage() {
 
           {/* Integrations Tab */}
           <TabsContent value="integrations" className="p-4 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Calendar sync</CardTitle>
+                <CardDescription>Connect Google Calendar or Microsoft Graph using secret references.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={connectCalendar} className="grid gap-4 md:grid-cols-2">
+                  <div><Label>Provider</Label>
+                    <Select value={calendarForm.provider} onValueChange={(value: "google" | "microsoft") => setCalendarForm({ ...calendarForm, provider: value })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="google">Google Calendar</SelectItem><SelectItem value="microsoft">Microsoft Graph</SelectItem></SelectContent>
+                    </Select>
+                  </div>
+                  <div><Label htmlFor="calendar-account">Account</Label><Input id="calendar-account" required value={calendarForm.external_account} onChange={(e) => setCalendarForm({ ...calendarForm, external_account: e.target.value })} /></div>
+                  <div><Label htmlFor="calendar-access-ref">Access token reference</Label><Input id="calendar-access-ref" required value={calendarForm.access_token_ref} onChange={(e) => setCalendarForm({ ...calendarForm, access_token_ref: e.target.value })} /></div>
+                  <div><Label htmlFor="calendar-refresh-ref">Refresh token reference</Label><Input id="calendar-refresh-ref" value={calendarForm.refresh_token_ref} onChange={(e) => setCalendarForm({ ...calendarForm, refresh_token_ref: e.target.value })} /></div>
+                  <div className="md:col-span-2 flex items-center gap-3"><Button type="submit" disabled={calendarLoading}>{calendarLoading ? "Saving..." : "Save connection"}</Button>
+                    {calendarConnection && <Badge variant={calendarConnection.status === "ACTIVE" ? "default" : "outline"}>Sync status: {calendarConnection.status || "ACTIVE"}</Badge>}
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-semibold">External Integrations</h2>
@@ -521,8 +575,8 @@ export default function SettingsPage() {
                   <div className="p-4 border rounded-lg bg-muted/30">
                     <div className="flex items-center justify-between">
                       <div>
-                        <h3 className="font-semibold">Current Plan: <span className="text-primary">Enterprise</span></h3>
-                        <p className="text-sm text-muted-foreground">Unlimited meetings, advanced AI, priority support</p>
+                        <h3 className="font-semibold">Current Plan: <span className="text-primary">{tenantData?.plan || "Unknown"}</span></h3>
+                        <p className="text-sm text-muted-foreground">Tenant-scoped usage and policy controls</p>
                       </div>
                       <Badge variant="secondary" className="text-sm">Active</Badge>
                     </div>
@@ -530,15 +584,15 @@ export default function SettingsPage() {
                   <div className="grid gap-4 md:grid-cols-3">
                     <div className="p-4 border rounded-lg">
                       <h4 className="font-medium mb-2">Meetings This Month</h4>
-                      <p className="text-3xl font-bold text-primary">142 / ∞</p>
+                      <p className="text-3xl font-bold text-primary">{tenantUsage?.meetings ?? "—"}</p>
                     </div>
                     <div className="p-4 border rounded-lg">
                       <h4 className="font-medium mb-2">Storage Used</h4>
-                      <p className="text-3xl font-bold text-primary">12.4 GB / 100 GB</p>
+                      <p className="text-3xl font-bold text-primary">—</p>
                     </div>
                     <div className="p-4 border rounded-lg">
                       <h4 className="font-medium mb-2">Team Members</h4>
-                      <p className="text-3xl font-bold text-primary">24 / 50</p>
+                      <p className="text-3xl font-bold text-primary">{tenantUsage?.users ?? "—"}</p>
                     </div>
                   </div>
                   <Button variant="outline">Manage Subscription</Button>

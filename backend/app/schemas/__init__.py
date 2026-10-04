@@ -43,6 +43,8 @@ class UUIDMixin(BaseModelConfig):
 # ─── Enums ───
 
 class MeetingStatus(str, Enum):
+    SCHEDULED = "SCHEDULED"
+    CAPTURING = "CAPTURING"
     UPLOADED = "UPLOADED"
     PROCESSING = "PROCESSING"
     TRANSCRIBED = "TRANSCRIBED"
@@ -90,6 +92,9 @@ class IntegrationProvider(str, Enum):
     LINEAR = "linear"
     SLACK = "slack"
     TEAMS = "teams"
+    GITHUB = "github"
+    SALESFORCE = "salesforce"
+    NOTION = "notion"
 
 
 class Priority(str, Enum):
@@ -169,6 +174,44 @@ class Meeting(MeetingBase, UUIDMixin, TimestampMixin):
     tenant_id: UUID
     status: MeetingStatus = MeetingStatus.UPLOADED
     model_config = ConfigDict(from_attributes=True)
+
+
+class CaptureProvider(str, Enum):
+    RECALL = "recall"
+    FIREFLIES = "fireflies"
+
+
+class CaptureStatus(str, Enum):
+    SCHEDULING = "SCHEDULING"
+    SCHEDULED = "SCHEDULED"
+    JOINING = "JOINING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class MeetingCaptureCreate(BaseModel):
+    meeting_id: UUID
+    provider: CaptureProvider
+    external_bot_id: str = Field(..., min_length=1, max_length=255)
+    webhook_secret: str = Field(..., min_length=32)
+
+
+class MeetingCapture(BaseModelConfig):
+    id: UUID
+    tenant_id: UUID
+    meeting_id: UUID
+    provider: CaptureProvider
+    external_bot_id: str
+    status: CaptureStatus
+    recording_url: Optional[str] = None
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    last_event_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class AttendeeBase(BaseModel):

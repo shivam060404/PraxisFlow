@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Generate Prisma client
 COPY prisma/ ./prisma/
+ENV PATH=/root/.local/bin:$PATH
 RUN prisma generate
 
 # ─── Runtime Stage ───

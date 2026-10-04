@@ -179,7 +179,7 @@ class DeepgramASRService:
         return result
 
     def _apply_pii_redaction(self, transcript: "TranscriptResult") -> None:
-        """Redact PII from transcript text when enabled. Never blocks ingestion."""
+        """Redact PII before persistence; failure is fail-closed."""
         if not getattr(settings, "PII_REDACTION_ENABLED", True):
             return
 
@@ -207,10 +207,9 @@ class DeepgramASRService:
                 logger.info(
                     f"PII redaction applied to transcript {transcript.id}"
                 )
-        except ImportError as e:
-            logger.warning(f"PII redaction unavailable ({e}); storing unredacted")
         except Exception as e:
-            logger.warning(f"PII redaction failed ({e}); storing unredacted")
+            logger.error("PII redaction failed; refusing unredacted persistence: %s", e)
+            raise RuntimeError("PII redaction is required but unavailable") from e
 
     @staticmethod
     def _rebuild_word_timings(

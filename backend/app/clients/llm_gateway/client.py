@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import hashlib
+import uuid
 from typing import Dict, Any, Optional, List, AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,8 +23,9 @@ from app.ai.guardrails.manager import (
     litellm_pre_call_hook,
     litellm_post_call_hook,
 )
+from app.db.prisma import get_prisma
 from app.clients.llm_gateway.routing import ModelRouter, RoutingPolicy
-from app.clients.llm_gateway.budgets import TokenBudgetManager
+from app.clients.llm_gateway.budgets import TokenBudgetManager, BudgetBackendUnavailableError
 from app.clients.llm_gateway.caching import SemanticCache
 from app.clients.llm_gateway.circuit_breaker import CircuitBreaker
 
@@ -159,9 +161,14 @@ class LLMGatewayClient:
 
         # Check token budget
         estimated_tokens = self._estimate_tokens(messages, model_config.get("max_tokens", 4096))
-        budget_ok = await self.budget_manager.check_budget(tenant_id, estimated_tokens)
+        try:
+            budget_ok = await self.budget_manager.check_budget(tenant_id, estimated_tokens)
+        except BudgetBackendUnavailableError as exc:
+            raise BudgetExceededError(str(exc)) from exc
         if not budget_ok:
             raise BudgetExceededError(f"Token budget exceeded for tenant {tenant_id}")
+        reserved_cost = await self._check_monthly_cost_budget(tenant_id, estimated_tokens)
+        correlation_id = uuid.uuid4().hex
 
         # Execute with fallback chain
         last_error = None
@@ -218,6 +225,21 @@ class LLMGatewayClient:
 
                     # Record budget usage
                     await self.budget_manager.record_usage(tenant_id, usage.total_tokens)
+                    await self.budget_manager.settle_monthly_cost(
+                        tenant_id, reserved_cost, cost
+                    )
+                    await self._record_usage(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        meeting_id=meeting_id,
+                        pipeline_run_id=pipeline_run_id,
+                        pipeline_node=pipeline_node,
+                        model=attempt_model,
+                        usage=usage,
+                        cost_usd=cost,
+                        cached=False,
+                        correlation_id=correlation_id,
+                    )
 
                     # Build response
                     result = GatewayResponse(
@@ -250,7 +272,99 @@ class LLMGatewayClient:
                 await self.circuit_breaker.record_failure(attempt_model)
 
         # All models failed
+        try:
+            await self.budget_manager.settle_monthly_cost(tenant_id, reserved_cost, 0)
+        except Exception:
+            logger.exception("Unable to release unused monthly LLM reservation")
         raise LLMGatewayError(f"All models failed. Last error: {last_error}")
+
+    async def _record_usage(
+        self,
+        tenant_id: str,
+        user_id: Optional[str],
+        meeting_id: Optional[str],
+        pipeline_run_id: Optional[str],
+        pipeline_node: str,
+        model: str,
+        usage: Any,
+        cost_usd: float,
+        cached: bool,
+        correlation_id: Optional[str] = None,
+    ) -> None:
+        """Persist usage after a successful provider call for margin reporting."""
+        try:
+            db = await get_prisma()
+            data = {
+                    "correlationId": correlation_id or uuid.uuid4().hex,
+                    "tenantId": tenant_id,
+                    "userId": user_id,
+                    "meetingId": meeting_id,
+                    "pipelineRunId": pipeline_run_id,
+                    "pipelineNode": pipeline_node,
+                    "provider": self._get_provider(model),
+                    "model": model,
+                    "promptTokens": usage.prompt_tokens,
+                    "completionTokens": usage.completion_tokens,
+                    "totalTokens": usage.total_tokens,
+                    "costUsd": cost_usd,
+                    "cached": cached,
+                }
+            await db.llmusagerecord.create(data=data)
+            from app.services.cost_analytics import publish_usage
+            await publish_usage({
+                "id": correlation_id or uuid.uuid4().hex,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "meeting_id": meeting_id,
+                "pipeline_node": pipeline_node,
+                "provider": self._get_provider(model),
+                "model": model,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+                "cost_usd": cost_usd,
+                "cached": cached,
+                "created_at": datetime.utcnow().isoformat(),
+            })
+        except Exception as exc:
+            # A retried worker may replay the same provider result. The unique
+            # correlation key makes that replay an idempotent ledger write.
+            if exc.__class__.__name__ == "UniqueViolationError":
+                return
+            logger.exception("Unable to persist LLM usage ledger entry")
+            if settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}:
+                raise LLMGatewayError("LLM usage accounting is unavailable")
+
+    async def _check_monthly_cost_budget(self, tenant_id: str, estimated_tokens: int) -> None:
+        """Stop new calls when the tenant's configured monthly spend is exhausted."""
+        db = await get_prisma()
+        start_of_month = datetime.utcnow().replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        tenant = await db.tenant.find_unique(
+            where={"id": tenant_id},
+            select={"monthlyLlmBudgetUsd": True},
+        )
+        if not tenant:
+            raise BudgetExceededError(f"Tenant not found for LLM request: {tenant_id}")
+        usage = await db.llmusagerecord.aggregate(
+            where={"tenantId": tenant_id, "createdAt": {"gte": start_of_month}},
+            _sum={"costUsd": True},
+        )
+        spent = usage._sum.costUsd or 0
+        estimated_cost = estimated_tokens * 0.001 / 1000
+        try:
+            allowed = await self.budget_manager.reserve_monthly_cost(
+                tenant_id,
+                tenant.monthlyLlmBudgetUsd,
+                estimated_cost,
+                initial_spent_usd=spent,
+            )
+        except BudgetBackendUnavailableError as exc:
+            raise BudgetExceededError(str(exc)) from exc
+        if not allowed:
+            raise BudgetExceededError(f"Monthly LLM budget exceeded for tenant {tenant_id}")
+        return estimated_cost
 
     async def _make_completion(
         self,
@@ -270,6 +384,15 @@ class LLMGatewayClient:
             "stream": stream,
             "metadata": context,
         }
+        if settings.LLM_GATEWAY_URL:
+            kwargs["api_base"] = f"{settings.LLM_GATEWAY_URL.rstrip('/')}/v1"
+            if settings.LLM_GATEWAY_API_KEY:
+                kwargs["api_key"] = settings.LLM_GATEWAY_API_KEY
+        elif (
+            settings.LLM_GATEWAY_REQUIRED
+            and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+        ):
+            raise LLMGatewayError("LLM gateway proxy is required but not configured")
 
         if model_config.get("response_format"):
             kwargs["response_format"] = model_config["response_format"]
@@ -294,17 +417,49 @@ class LLMGatewayClient:
         budget_ok = await self.budget_manager.check_budget(tenant_id, estimated)
         if not budget_ok:
             raise BudgetExceededError(f"Token budget exceeded for tenant {tenant_id}")
+        reserved_cost = await self._check_monthly_cost_budget(tenant_id, estimated)
+        correlation_id = uuid.uuid4().hex
 
-        response = await aembedding(
-            model=model,
-            input=texts,
-            metadata={"tenant_id": tenant_id, "user_id": user_id},
-        )
+        embedding_kwargs = {
+            "model": model,
+            "input": texts,
+            "metadata": {"tenant_id": tenant_id, "user_id": user_id},
+        }
+        if settings.LLM_GATEWAY_URL:
+            embedding_kwargs["api_base"] = f"{settings.LLM_GATEWAY_URL.rstrip('/')}/v1"
+            if settings.LLM_GATEWAY_API_KEY:
+                embedding_kwargs["api_key"] = settings.LLM_GATEWAY_API_KEY
+        elif (
+            settings.LLM_GATEWAY_REQUIRED
+            and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+        ):
+            raise LLMGatewayError("LLM gateway proxy is required but not configured")
+        try:
+            response = await aembedding(**embedding_kwargs)
+        except Exception:
+            try:
+                await self.budget_manager.settle_monthly_cost(tenant_id, reserved_cost, 0)
+            except Exception:
+                logger.exception("Unable to release unused embedding reservation")
+            raise
 
         usage = response.usage
         cost = self._calculate_cost(model, usage.prompt_tokens, 0)
 
         await self.budget_manager.record_usage(tenant_id, usage.total_tokens)
+        await self.budget_manager.settle_monthly_cost(tenant_id, reserved_cost, cost)
+        await self._record_usage(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            meeting_id=None,
+            pipeline_run_id=None,
+            pipeline_node="embedding",
+            model=model,
+            usage=usage,
+            cost_usd=cost,
+            cached=False,
+            correlation_id=correlation_id,
+        )
 
         return EmbeddingResponse(
             embeddings=[d.embedding for d in response.data],

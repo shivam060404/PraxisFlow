@@ -13,6 +13,7 @@ from app.workers.celery_app import celery_app
 from app.db.prisma import get_prisma, close_prisma, set_tenant_context, get_db
 from app.schemas import HealthResponse, ErrorResponse
 from app.workers.kafka_consumers import startup_kafka, shutdown_kafka
+from app.api import notification_actions
 
 # ─── Enterprise Components ───
 from app.observability import init_observability, shutdown_observability, get_otel_logger, genai_tracer, LLMCallAttributes
@@ -299,18 +300,22 @@ async def liveness_check():
 
 # ─── API Routes ───
 
-from app.api import meetings, tasks, transcripts, integrations, websocket, users, metrics, admin, compliance, webhooks, auth
+from app.api import meetings, tasks, transcripts, integrations, websocket, users, metrics, admin, compliance, webhooks, auth, capture_webhooks, calendar, live_transcripts
 
 app.include_router(meetings.router, prefix=settings.API_V1_PREFIX)
 app.include_router(tasks.router, prefix=settings.API_V1_PREFIX)
 app.include_router(transcripts.router, prefix=settings.API_V1_PREFIX)
 app.include_router(integrations.router, prefix=settings.API_V1_PREFIX)
 app.include_router(websocket.router, prefix=settings.API_V1_PREFIX)
+app.include_router(live_transcripts.router, prefix=settings.API_V1_PREFIX)
 app.include_router(users.router, prefix=settings.API_V1_PREFIX)
 app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin.router, prefix=settings.API_V1_PREFIX)
 app.include_router(compliance.router, prefix=settings.API_V1_PREFIX)
 app.include_router(webhooks.router, prefix=settings.API_V1_PREFIX)
+app.include_router(capture_webhooks.router, prefix=settings.API_V1_PREFIX)
+app.include_router(calendar.router, prefix=settings.API_V1_PREFIX)
+app.include_router(notification_actions.router, prefix=settings.API_V1_PREFIX)
 app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 
 

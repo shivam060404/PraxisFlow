@@ -30,6 +30,40 @@ celery_app.conf.update(
     worker_prefetch_multiplier=4,
     worker_max_tasks_per_child=100,
     result_expires=86400,  # 24 hours
+    beat_schedule={
+        "relay-task-outbox": {
+            "task": "app.workers.tasks.relay_outbox",
+            "schedule": 15.0,
+        },
+        "cleanup-stale-outbox": {
+            "task": "app.workers.tasks.requeue_stale_outbox",
+            "schedule": 300.0,
+        },
+        "cleanup-stale-webhooks": {
+            "task": "app.workers.tasks.requeue_stale_webhook_events",
+            "schedule": 300.0,
+        },
+        "schedule-upcoming-captures": {
+            "task": "app.workers.tasks.schedule_upcoming_captures",
+            "schedule": 60.0,
+        },
+        "deliver-notifications": {
+            "task": "app.workers.tasks.deliver_notifications",
+            "schedule": 15.0,
+        },
+        "cleanup-stale-notifications": {
+            "task": "app.workers.tasks.requeue_stale_notifications",
+            "schedule": 300.0,
+        },
+        "enforce-retention-policies": {
+            "task": "app.workers.tasks.enforce_retention_policies",
+            "schedule": 86400.0,
+        },
+        "reconcile-external-tasks": {
+            "task": "app.workers.tasks.reconcile_external_tasks",
+            "schedule": 900.0,
+        },
+    },
 )
 
 # Task routing
@@ -38,6 +72,10 @@ celery_app.conf.task_routes = {
     "app.workers.tasks.run_extraction": {"queue": "extraction"},
     "app.workers.tasks.sync_task_to_integrations": {"queue": "integrations"},
     "app.workers.tasks.retry_failed_sync": {"queue": "integrations"},
+    "app.workers.tasks.relay_outbox": {"queue": "integrations"},
+    "app.workers.tasks.requeue_stale_outbox": {"queue": "integrations"},
+    "app.workers.tasks.reconcile_external_tasks": {"queue": "integrations"},
+    "app.workers.tasks.process_webhook_event": {"queue": "integrations"},
 }
 
 

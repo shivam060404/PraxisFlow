@@ -123,6 +123,22 @@ class LinearAdapter(IntegrationPort):
         await self._execute_query(config, query, {"id": external_id})
         logger.info(f"Deleted Linear issue {external_id}")
 
+    async def reconcile_task(self, config: IntegrationConfig, task: Task) -> Optional[Dict[str, Any]]:
+        if not task.external_id:
+            return None
+        query = """query IssueByIdentifier($id: String!) { issue(id: $id) { id identifier url state { name type } } }"""
+        result = await self._execute_query(config, query, {"id": task.external_id})
+        if result.get("errors"):
+            message = str(result["errors"]).lower()
+            if "not found" in message or "does not exist" in message:
+                return {"missing": True, "external_id": task.external_id}
+            raise RuntimeError(f"Linear reconciliation failed: {result['errors']}")
+        issue = result.get("data", {}).get("issue")
+        if not issue:
+            return {"missing": True, "external_id": task.external_id}
+        state = issue.get("state", {})
+        return {"external_id": issue.get("identifier", task.external_id), "external_url": issue.get("url"), "status": self.normalize_status(state.get("type") or state.get("name"))}
+
     def normalize_webhook(self, payload: Dict[str, Any]) -> NormalizedWebhookEvent:
         """Convert Linear webhook to normalized event."""
         action = payload.get("action")

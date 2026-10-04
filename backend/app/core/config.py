@@ -65,17 +65,69 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT.lower() in {'production', 'prod'}:
             if not self.JWT_SECRET or self.JWT_SECRET == 'dev_secret_change_in_production':
                 raise ValueError('JWT_SECRET must be a strong unique value in production')
+            if self.CALENDAR_OAUTH_STATE_SECRET.startswith("dev-") or self.CALENDAR_TOKEN_ENCRYPTION_KEY.startswith("dev-"):
+                raise ValueError('Calendar OAuth secrets must be configured in production')
             if not self.CLERK_SECRET_KEY:
                 import logging
                 logging.getLogger(__name__).warning(
                     'Production without Clerk configured: falling back to local HS256 auth'
                 )
+            if self.LLM_GATEWAY_REQUIRED and not self.LLM_GATEWAY_URL:
+                raise ValueError('LLM_GATEWAY_URL is required in production')
 
     # Langfuse
     LANGFUSE_PUBLIC_KEY: Optional[str] = None
     LANGFUSE_SECRET_KEY: Optional[str] = None
     LANGFUSE_HOST: str = "http://localhost:3000"
     LLM_GATEWAY_URL: Optional[str] = None  # LiteLLM proxy; unset = not deployed
+    LLM_GATEWAY_API_KEY: Optional[str] = None
+    LLM_GATEWAY_REQUIRED: bool = True
+    LLM_MONTHLY_BUDGET_DEFAULT_USD: float = 500.0
+    LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE: bool = True
+    CLICKHOUSE_URL: Optional[str] = None
+    CLICKHOUSE_DATABASE: str = "praxisflow"
+    CLICKHOUSE_USAGE_TABLE: str = "llm_usage"
+    AWS_REGION: str = "us-east-1"
+    KMS_REQUIRED_FOR_TENANT_DATA: bool = False
+
+    # Ambient meeting capture
+    CAPTURE_SCHEDULER_ENABLED: bool = False
+    RECALL_API_URL: str = "https://us-west-2.recall.ai/api/v1"
+    RECALL_API_KEY: Optional[str] = None
+    RECALL_BOT_NAME: str = "PraxisFlow"
+
+    # Calendar OAuth. Secrets are references in the database; these values are
+    # deployment configuration and must be injected by the secret manager.
+    CALENDAR_OAUTH_STATE_SECRET: str = "dev-calendar-state-change-in-production"
+    CALENDAR_TOKEN_ENCRYPTION_KEY: str = "dev-calendar-token-key-change-in-production"
+    CALENDAR_REDIRECT_URI: str = "http://localhost:8000/api/v1/calendar/oauth/callback"
+    GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
+    GOOGLE_OAUTH_CLIENT_SECRET: Optional[str] = None
+    GOOGLE_OAUTH_AUTHORIZE_URL: str = "https://accounts.google.com/o/oauth2/v2/auth"
+    GOOGLE_OAUTH_TOKEN_URL: str = "https://oauth2.googleapis.com/token"
+    MICROSOFT_OAUTH_CLIENT_ID: Optional[str] = None
+    MICROSOFT_OAUTH_CLIENT_SECRET: Optional[str] = None
+    SLACK_CLIENT_ID: Optional[str] = None
+    SLACK_CLIENT_SECRET: Optional[str] = None
+    SLACK_REDIRECT_URI: str = "http://localhost:8000/api/v1/integrations/oauth/slack/callback"
+    TEAMS_CLIENT_ID: Optional[str] = None
+    TEAMS_CLIENT_SECRET: Optional[str] = None
+    TEAMS_REDIRECT_URI: str = "http://localhost:8000/api/v1/integrations/oauth/teams/callback"
+    MICROSOFT_OAUTH_AUTHORIZE_URL: str = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    MICROSOFT_OAUTH_TOKEN_URL: str = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
+    # Notification delivery
+    NOTIFICATION_SMTP_HOST: Optional[str] = None
+    NOTIFICATION_SMTP_PORT: int = 587
+    NOTIFICATION_SMTP_TLS: bool = True
+    NOTIFICATION_SMTP_USERNAME: Optional[str] = None
+    NOTIFICATION_SMTP_PASSWORD: Optional[str] = None
+    NOTIFICATION_FROM_EMAIL: str = "notifications@praxisflow.local"
+    # Signed links are used by Slack/Teams action buttons. Keep this separate
+    # from webhook credentials and rotate it independently.
+    NOTIFICATION_ACTION_SECRET: Optional[str] = None
+    NOTIFICATION_ACTION_BASE_URL: str = "http://localhost:8000/api/v1/notifications/actions"
+    NOTIFICATION_ACTION_TTL_SECONDS: int = 7 * 24 * 60 * 60
 
     # Deepgram Options
     DEEPGRAM_MODEL: str = "nova-2"
@@ -84,6 +136,14 @@ class Settings(BaseSettings):
     DEEPGRAM_UTTERANCES: bool = True
     DEEPGRAM_PUNCTUATE: bool = True
     DEEPGRAM_PARAGRAPHS: bool = True
+
+    # Live transcript relay. Disabled by default: enabling requires an
+    # explicitly configured vendor key and a bounded in-process relay.
+    LIVE_TRANSCRIPT_ENABLED: bool = False
+    LIVE_TRANSCRIPT_MAX_BUFFER_BYTES: int = 4 * 1024 * 1024
+    LIVE_TRANSCRIPT_MAX_CHUNK_BYTES: int = 256 * 1024
+    LIVE_TRANSCRIPT_QUEUE_SIZE: int = 64
+    LIVE_TRANSCRIPT_IDLE_TIMEOUT_SECONDS: int = 30
 
     # GDPR: redact PII from transcripts before persistence and LLM calls
     PII_REDACTION_ENABLED: bool = True

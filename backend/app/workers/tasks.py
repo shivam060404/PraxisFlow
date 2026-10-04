@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from app.db.prisma import get_prisma
@@ -201,6 +201,14 @@ async def _run_extraction_async(meeting_id: str):
         verify_task.delay(task.id)
     
     task_count = len(final_state.get("final_tasks", [])) if final_state.get("final_tasks") else 0
+    users = await db.user.find_many(
+        where={"tenantId": meeting.tenantId, "status": "ACTIVE"},
+        select={"email": True},
+    )
+    from app.services.notifications import enqueue_meeting_notifications
+
+    await enqueue_meeting_notifications(meeting, users, db=db)
+    deliver_notifications.delay()
     logger.info(f"Extraction pipeline created {task_count} tasks for meeting {meeting_id}")
     
     # Check if pipeline was interrupted for HITL
@@ -468,12 +476,12 @@ def sync_task_to_integrations(self, task_id: str):
 
 
 async def _sync_task_async(task_id: str, integration_id: str = None):
-    """Async integration sync using adapter pattern."""
+    """Enqueue integration delivery; providers are never called inline."""
     db = await get_prisma()
     
     task = await db.task.find_unique(
         where={"id": task_id},
-        include={"meeting": True},
+        include={"meeting": {"include": {"tasks": True}}},
     )
     
     if not task:
@@ -494,48 +502,35 @@ async def _sync_task_async(task_id: str, integration_id: str = None):
         logger.info(f"No active integrations for tenant {task.tenantId}, skipping sync")
         return {"synced": 0, "results": []}
     
-    from app.integrations.factory import IntegrationAdapterFactory
-    
     results = []
-    
+
     for integration in integrations:
         try:
-            adapter = IntegrationAdapterFactory.get_adapter(integration.provider)
-            
-            # Create task in external system
-            external_id = await adapter.create_task(integration, task)
-            
-            # Build external URL based on provider
-            external_url = ""
-            if integration.provider == "jira":
-                base_url = integration.config.get("base_url", "")
-                external_url = f"{base_url}/browse/{external_id}"
-            elif integration.provider == "linear":
-                external_url = f"https://linear.app/issue/{external_id}"
-            elif integration.provider == "asana":
-                external_url = f"https://app.asana.com/0/{external_id}"
-            
-            # Update task with real external ID
+            if (
+                task.integrationId == integration.id
+                and task.externalId
+                and task.syncStatus == "SYNCED"
+            ):
+                results.append(
+                    {
+                        "integration": integration.provider,
+                        "status": "already_synced",
+                        "external_id": task.externalId,
+                    }
+                )
+                continue
+            from app.services.task_outbox import enqueue_task_sync
+
+            await enqueue_task_sync(task, integration, db=db)
             await db.task.update(
                 where={"id": task_id},
                 data={
                     "integrationId": integration.id,
-                    "externalId": external_id,
-                    "externalUrl": external_url,
-                    "syncStatus": "SYNCED",
-                    "lastSyncedAt": datetime.utcnow(),
-                    "status": "SYNCED",
+                    "syncStatus": "PENDING",
                 },
             )
-            
-            logger.info(f"Synced task {task_id} to {integration.provider} as {external_id}")
-            
-            results.append({
-                "integration": integration.provider,
-                "status": "synced",
-                "external_id": external_id,
-            })
-            
+            relay_outbox.delay()
+            results.append({"integration": integration.provider, "status": "queued"})
         except Exception as e:
             logger.error(f"Failed to sync to {integration.provider}: {e}")
             
@@ -549,8 +544,344 @@ async def _sync_task_async(task_id: str, integration_id: str = None):
                 "status": "failed",
                 "error": str(e),
             })
-    
-    return {"synced": len([r for r in results if r["status"] == "synced"]), "results": results}
+
+    return {"queued": len([r for r in results if r["status"] == "queued"]), "results": results}
+
+
+@shared_task(bind=True, max_retries=5, default_retry_delay=60)
+def relay_outbox(self):
+    """Deliver pending outbox records with at-least-once semantics."""
+    try:
+        return run_async(_relay_outbox_async())
+    except Exception as exc:
+        logger.error("Outbox relay failed: %s", exc)
+        raise self.retry(exc=exc)
+
+
+async def _relay_outbox_async(limit: int = 50):
+    db = await get_prisma()
+    from app.integrations.factory import IntegrationAdapterFactory
+    from app.services.task_outbox import requeue_stale_outbox_events
+
+    await requeue_stale_outbox_events(db)
+    events = await db.taskoutbox.find_many(
+        where={
+            "status": "PENDING",
+            "availableAt": {"lte": datetime.utcnow()},
+        },
+        take=limit,
+        order={"createdAt": "asc"},
+        include={"task": {"include": {"meeting": True}}, "integration": True},
+    )
+    delivered = 0
+    for event in events:
+        claimed = await db.taskoutbox.update_many(
+            where={"id": event.id, "status": "PENDING"},
+            data={
+                "status": "PROCESSING",
+                "lockedAt": datetime.utcnow(),
+                "attempts": {"increment": 1},
+            },
+        )
+        if not claimed:
+            continue
+        try:
+            adapter = IntegrationAdapterFactory.get_adapter(event.integration.provider)
+            external_id = await adapter.create_task(event.integration, event.task)
+            base_url = (event.integration.config or {}).get("base_url", "")
+            external_url = (
+                f"{base_url}/browse/{external_id}"
+                if event.integration.provider == "jira"
+                else (
+                    f"https://linear.app/issue/{external_id}"
+                    if event.integration.provider == "linear"
+                    else f"https://app.asana.com/0/{external_id}"
+                )
+            )
+            await db.task.update(
+                where={"id": event.taskId},
+                data={
+                    "externalId": external_id,
+                    "externalUrl": external_url,
+                    "syncStatus": "SYNCED",
+                    "lastSyncedAt": datetime.utcnow(),
+                    "status": "SYNCED",
+                },
+            )
+            await db.taskoutbox.update(
+                where={"id": event.id},
+                data={
+                    "status": "SYNCED",
+                    "processedAt": datetime.utcnow(),
+                    "lockedAt": None,
+                    "lastError": None,
+                },
+            )
+            delivered += 1
+        except Exception as exc:
+            logger.exception("Outbox delivery failed for %s", event.id)
+            await db.taskoutbox.update(
+                where={"id": event.id},
+                data={
+                    "status": "PENDING",
+                    "availableAt": datetime.utcnow() + timedelta(minutes=min(30, 2 ** min(event.attempts, 5))),
+                    "lockedAt": None,
+                    "lastError": str(exc),
+                },
+            )
+    return {"delivered": delivered, "inspected": len(events)}
+
+
+@shared_task
+def requeue_stale_outbox():
+    """Recover leases held by workers that terminated unexpectedly."""
+    return run_async(_requeue_stale_outbox_async())
+
+
+@shared_task
+def requeue_stale_webhook_events():
+    """Recover webhook leases held by workers that terminated unexpectedly."""
+    return run_async(_requeue_stale_webhook_events_async())
+
+
+@shared_task
+def deliver_notifications():
+    return run_async(_deliver_notifications_async())
+
+
+async def _deliver_notifications_async(limit: int = 50):
+    db = await get_prisma()
+    from app.services.notifications import claim_delivery, deliver_notification
+
+    deliveries = await db.notificationdelivery.find_many(
+        where={"status": "PENDING", "availableAt": {"lte": datetime.utcnow()}},
+        take=limit,
+        order={"createdAt": "asc"},
+        include={"meeting": True},
+    )
+    sent = 0
+    for delivery in deliveries:
+        if not await claim_delivery(delivery.id, db=db):
+            continue
+        try:
+            await deliver_notification(delivery, delivery.meeting)
+            await db.notificationdelivery.update(
+                where={"id": delivery.id},
+                data={"status": "SENT", "sentAt": datetime.utcnow(), "lastError": None},
+            )
+            sent += 1
+        except Exception as exc:
+            logger.exception("Notification delivery failed for %s", delivery.id)
+            terminal = delivery.attempts >= 5
+            await db.notificationdelivery.update(
+                where={"id": delivery.id},
+                data={
+                    "status": "DEAD_LETTER" if terminal else "PENDING",
+                    "availableAt": datetime.utcnow() + timedelta(minutes=min(30, 2 ** min(delivery.attempts, 5))),
+                    "lastError": str(exc),
+                },
+            )
+    return {"sent": sent, "inspected": len(deliveries)}
+
+
+@shared_task
+def requeue_stale_notifications():
+    return run_async(_requeue_stale_notifications_async())
+
+
+async def _requeue_stale_notifications_async():
+    db = await get_prisma()
+    from app.services.notifications import requeue_stale_notifications as requeue
+
+    return {"requeued": await requeue(db)}
+
+
+@shared_task
+def schedule_upcoming_captures():
+    """Schedule capture bots for meetings starting within the next 15 minutes."""
+    return run_async(_schedule_upcoming_captures_async())
+
+
+async def _schedule_upcoming_captures_async():
+    from app.core.config import settings
+    from app.services.meeting_capture import schedule_recall_capture
+
+    if not settings.CAPTURE_SCHEDULER_ENABLED:
+        return {"status": "disabled", "scheduled": 0}
+    db = await get_prisma()
+    now = datetime.utcnow()
+    horizon = now + timedelta(minutes=15)
+    meetings = await db.meeting.find_many(
+        where={
+            "status": "SCHEDULED",
+            "scheduledAt": {"gte": now, "lte": horizon},
+            "consentStatus": "granted",
+            "captures": {
+                "none": {
+                    "status": {
+                        "in": ["SCHEDULING", "SCHEDULED", "JOINING", "IN_PROGRESS", "COMPLETED"]
+                    }
+                }
+            },
+        },
+        include={"calendarEvent": True, "tenant": True},
+        take=100,
+    )
+    scheduled = 0
+    failed = 0
+    for meeting in meetings:
+        try:
+            try:
+                lease = await db.meetingcapture.find_first(
+                    where={"meetingId": meeting.id, "provider": "recall", "status": "FAILED"}
+                )
+                if lease:
+                    await db.meetingcapture.update(
+                        where={"id": lease.id},
+                        data={"status": "SCHEDULING", "lastAttemptAt": datetime.utcnow()},
+                    )
+                else:
+                    await db.meetingcapture.create(
+                        data={
+                            "tenantId": meeting.tenantId,
+                            "meetingId": meeting.id,
+                            "provider": "recall",
+                            "externalBotId": f"pending:{meeting.id}",
+                            "webhookSecret": "pending",
+                            "scheduledFor": meeting.scheduledAt,
+                            "status": "SCHEDULING",
+                        }
+                    )
+            except Exception:
+                # A competing scheduler already owns the meeting lease.
+                continue
+            await schedule_recall_capture(meeting, db=db)
+            scheduled += 1
+        except Exception as exc:
+            failed += 1
+            logger.exception("Capture scheduling failed for meeting %s: %s", meeting.id, exc)
+            await db.meetingcapture.update_many(
+                where={
+                    "meetingId": meeting.id,
+                    "provider": "recall",
+                    "status": "SCHEDULING",
+                },
+                data={
+                    "status": "FAILED",
+                    "errorMessage": str(exc),
+                    "lastAttemptAt": datetime.utcnow(),
+                    "attempts": {"increment": 1},
+                },
+            )
+    return {"status": "completed", "scheduled": scheduled, "failed": failed}
+
+
+async def _requeue_stale_webhook_events_async():
+    db = await get_prisma()
+    from app.services.webhook_events import requeue_stale_webhook_events as requeue
+
+    return {"requeued": await requeue(db)}
+
+
+@shared_task(bind=True, max_retries=5, default_retry_delay=60)
+def process_webhook_event(self, event_id: str):
+    """Apply one durable webhook event with retry and dead-letter semantics."""
+    try:
+        return run_async(_process_webhook_event_async(event_id))
+    except Exception as exc:
+        logger.exception("Webhook event processing failed for %s", event_id)
+        try:
+            return self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            return run_async(_dead_letter_webhook_event(event_id, str(exc)))
+
+
+async def _process_webhook_event_async(event_id: str):
+    db = await get_prisma()
+    event = await db.integrationwebhookevent.find_unique(
+        where={"id": event_id},
+        include={"integration": True},
+    )
+    if not event:
+        raise ValueError(f"Webhook event not found: {event_id}")
+    if event.status == "PROCESSED":
+        return {"status": "already_processed", "event_id": event_id}
+
+    from app.integrations.factory import IntegrationAdapterFactory
+    from app.services.webhook_events import claim_webhook_event
+
+    if not await claim_webhook_event(event_id, db=db):
+        return {"status": "already_claimed", "event_id": event_id}
+
+    try:
+        adapter = IntegrationAdapterFactory.get_adapter(event.provider)
+        normalized = adapter.normalize_webhook(event.payload)
+        task = await db.task.find_first(
+            where={
+                "externalId": normalized.external_id,
+                "integrationId": event.integrationId,
+                "tenantId": event.tenantId,
+            }
+        )
+        if task:
+            new_status = _map_external_status(event.provider, normalized.status or "")
+            if new_status != task.status:
+                await db.task.update(
+                    where={"id": task.id},
+                    data={
+                        "status": new_status,
+                        "syncStatus": "SYNCED",
+                        "lastSyncedAt": normalized.changed_at,
+                    },
+                )
+                await db.taskauditlog.create(
+                    data={
+                        "taskId": task.id,
+                        "previousStatus": task.status,
+                        "newStatus": new_status,
+                        "changedBy": f"webhook_{event.provider}",
+                        "reason": f"External status update from {event.provider}: {normalized.status}",
+                        "metadata": {"webhook_event_id": event.id},
+                    }
+                )
+
+        await db.integrationwebhookevent.update(
+            where={"id": event.id},
+            data={
+                "status": "PROCESSED",
+                "processedAt": datetime.utcnow(),
+                "lockedAt": None,
+                "lastError": None,
+            },
+        )
+        return {"status": "processed", "task_found": bool(task), "event_id": event_id}
+    except Exception as exc:
+        await db.integrationwebhookevent.update(
+            where={"id": event.id},
+            data={
+                "status": "PENDING",
+                "availableAt": datetime.utcnow() + timedelta(minutes=min(30, 2 ** min(event.attempts, 5))),
+                "lockedAt": None,
+                "lastError": str(exc),
+            },
+        )
+        raise
+
+
+async def _dead_letter_webhook_event(event_id: str, error: str):
+    db = await get_prisma()
+    await db.integrationwebhookevent.update(
+        where={"id": event_id},
+        data={"status": "DEAD_LETTER", "lockedAt": None, "lastError": error},
+    )
+    return {"status": "dead_letter", "event_id": event_id}
+
+
+async def _requeue_stale_outbox_async():
+    db = await get_prisma()
+    from app.services.task_outbox import requeue_stale_outbox_events
+
+    return {"requeued": await requeue_stale_outbox_events(db)}
 
 
 async def _mark_sync_failed(task_id: str, error: str):
@@ -588,3 +919,154 @@ def cleanup_old_data():
     result = run_async(_cleanup())
     logger.info("Periodic cleanup completed")
     return result
+
+
+@shared_task
+def enforce_retention_policies():
+    """Remove expired transcript/audio payloads without deleting audit records."""
+    return run_async(_enforce_retention_policies_async())
+
+
+@shared_task
+def reconcile_external_tasks(limit: int = 100):
+    """Run optional provider reconciliation hooks for durable task records."""
+    return run_async(_reconcile_external_tasks_async(limit))
+
+
+async def _reconcile_external_tasks_async(limit: int = 100):
+    db = await get_prisma()
+    from app.integrations.factory import IntegrationAdapterFactory
+
+    tasks = await db.task.find_many(
+        where={
+            "tenantId": {"not": None},
+            "externalId": {"not": None},
+            "integrationId": {"not": None},
+        },
+        include={"integration": True},
+        take=limit,
+        order={"updatedAt": "asc"},
+    )
+    reconciled = 0
+    failed = 0
+    missing = 0
+    for task in tasks:
+        integration = task.integration
+        if not integration:
+            continue
+        adapter, config = IntegrationAdapterFactory.create_adapter(integration)
+        # Only invoke providers that explicitly implement the hook.
+        from app.integrations.base import IntegrationPort
+        if type(adapter).reconcile_task is IntegrationPort.reconcile_task:
+            continue
+        try:
+            state = await adapter.reconcile_task(config, task)
+        except Exception:
+            failed += 1
+            logger.exception("External task reconciliation failed for %s", task.id)
+            await db.task.update(where={"id": task.id}, data={"syncStatus": "SYNC_FAILED"})
+            continue
+        if not state:
+            continue
+        if state.get("missing"):
+            missing += 1
+            await db.task.update(where={"id": task.id}, data={"syncStatus": "SYNC_FAILED"})
+            continue
+        data = {}
+        if state.get("external_url"):
+            data["externalUrl"] = state["external_url"]
+        if state.get("status"):
+            data["status"] = _map_reconciled_status(state["status"])
+            data["syncStatus"] = "SYNCED"
+            data["lastSyncedAt"] = datetime.utcnow()
+        if data:
+            await db.task.update(where={"id": task.id}, data=data)
+            reconciled += 1
+    return {"inspected": len(tasks), "reconciled": reconciled, "missing": missing, "failed": failed}
+
+
+def _map_reconciled_status(status: str) -> str:
+    """Map adapter-normalized status to the local task enum."""
+    return {
+        "todo": "EXTRACTED",
+        "in_progress": "ASSIGNED",
+        "in_review": "SYNCED",
+        "done": "COMPLETED",
+        "cancelled": "DISMISSED",
+    }.get(status, "SYNCED")
+
+
+def _map_external_status(provider: str, status: str) -> str:
+    """Normalize webhook and reconciliation statuses consistently."""
+    normalized = str(status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "to_do": "todo", "new": "todo", "backlog": "todo", "unstarted": "todo",
+        "started": "in_progress", "working": "in_progress",
+        "review": "in_review", "completed": "done", "closed": "done",
+        "resolved": "done", "canceled": "cancelled",
+    }
+    return _map_reconciled_status(aliases.get(normalized, normalized))
+
+
+async def _enforce_retention_policies_async():
+    db = await get_prisma()
+    tenants = await db.tenant.find_many(
+        select={"id": True, "retentionDays": True}
+    )
+    deleted_transcripts = 0
+    deleted_audio = 0
+    deleted_notifications = 0
+    deleted_webhooks = 0
+    deleted_audit_logs = 0
+    for tenant in tenants:
+        cutoff = datetime.utcnow() - timedelta(days=tenant.retentionDays)
+        meetings = await db.meeting.find_many(
+            where={
+                "tenantId": tenant.id,
+                "updatedAt": {"lt": cutoff},
+                "transcript": {"isNot": None},
+            },
+            select={"id": True, "audioUrl": True},
+            take=500,
+        )
+        for meeting in meetings:
+            audio_deleted = False
+            if meeting.audioUrl:
+                try:
+                    audio_deleted = await storage_service.delete_file(meeting.audioUrl)
+                    if audio_deleted:
+                        deleted_audio += 1
+                except Exception:
+                    logger.exception("Retention deletion failed for audio on %s", meeting.id)
+            deleted = await db.transcript.delete_many(
+                where={"meetingId": meeting.id}
+            )
+            deleted_transcripts += deleted
+            # Clear the durable reference after deleting the object so retries
+            # do not repeatedly attempt the same retention deletion.
+            if meeting.audioUrl and audio_deleted:
+                await db.meeting.update(
+                    where={"id": meeting.id},
+                    data={"audioUrl": None},
+                )
+        # Delivery and inbound webhook payloads can contain meeting/task
+        # content and must follow the same tenant-specific retention window.
+        deleted_notifications += await db.notificationdelivery.delete_many(
+            where={"tenantId": tenant.id, "createdAt": {"lt": cutoff}}
+        )
+        deleted_webhooks += await db.integrationwebhookevent.delete_many(
+            where={"tenantId": tenant.id, "createdAt": {"lt": cutoff}}
+        )
+        deleted_audit_logs += await db.taskauditlog.delete_many(
+            where={"task": {"tenantId": tenant.id}, "createdAt": {"lt": cutoff}}
+        )
+        deleted_audit_logs += await db.aiauditlog.delete_many(
+            where={"tenantId": tenant.id, "createdAt": {"lt": cutoff}}
+        )
+    return {
+        "transcripts_deleted": deleted_transcripts,
+        "audio_objects_deleted": deleted_audio,
+        "notifications_deleted": deleted_notifications,
+        "webhook_payloads_deleted": deleted_webhooks,
+        "audit_logs_deleted": deleted_audit_logs,
+    }

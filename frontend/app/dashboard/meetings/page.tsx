@@ -9,7 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Loader2, Search, Calendar, Upload, Mic, MoreVertical, Play, Trash2, Download, Eye, X } from "lucide-react";
+import { Loader2, Search, Calendar, Upload, Mic, MoreVertical, Play, Trash2, Download, Eye, X, ShieldCheck } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -84,6 +84,11 @@ export default function MeetingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["meetings"] });
     },
+  });
+
+  const consentMutation = useMutation({
+    mutationFn: (id: string) => api.recordMeetingConsent(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
   });
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -280,6 +285,12 @@ export default function MeetingsPage() {
                               >
                                 {meeting.status.replace(/_/g, " ")}
                               </Badge>
+                              {meeting.recording_source !== "upload" && (
+                                <Badge variant={meeting.consent_status === "granted" ? "default" : "outline"} className="text-xs">
+                                  <ShieldCheck className="mr-1 h-3 w-3" />
+                                  {meeting.consent_status === "granted" ? "Consent recorded" : "Consent required"}
+                                </Badge>
+                              )}
                             </div>
                           </div>
                           <DropdownMenu>
@@ -309,6 +320,12 @@ export default function MeetingsPage() {
                                 </DropdownMenuItem>
                               )}
                               <DropdownMenuSeparator />
+                              {meeting.recording_source !== "upload" && meeting.consent_status !== "granted" && (
+                                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); consentMutation.mutate(meeting.id); }}>
+                                  <ShieldCheck className="h-4 w-4 mr-2" />
+                                  Record consent
+                                </DropdownMenuItem>
+                              )}
                               {meeting.status === "ERROR" && (
                                 <DropdownMenuItem onClick={(e) => { e.stopPropagation(); reprocessMutation.mutate(meeting.id); }}>
                                   <Play className="h-4 w-4 mr-2" />

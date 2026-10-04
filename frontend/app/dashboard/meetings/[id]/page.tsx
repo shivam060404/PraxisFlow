@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn, formatRelativeTime, truncate } from "@/lib/utils";
 import { api, type Meeting, type Transcript, type Utterance, type Task } from "@/lib/api";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
@@ -15,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Loader2, User, Clock, MessageSquare, Play, Pause, Volume2, Search, ChevronLeft, ChevronRight, Flag, CheckCircle, AlertTriangle, ArrowRightCircle, Gavel, Copy } from "lucide-react";
+import { Loader2, User, Clock, MessageSquare, Play, Pause, Volume2, Search, ChevronLeft, ChevronRight, Flag, CheckCircle, AlertTriangle, ArrowRightCircle, Gavel, Copy, Radio } from "lucide-react";
 import { TaskCard } from "@/components/dashboard/task-card";
 
 const typeIcons = {
@@ -275,6 +275,9 @@ function ExtractedTasksPanel({ tasks, meetingId }: { tasks: Task[]; meetingId: s
 export default function MeetingContextPage() {
   const params = useParams();
   const meetingId = params.id as string;
+  const queryClient = useQueryClient();
+  const [liveStatus, setLiveStatus] = React.useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const [liveLines, setLiveLines] = React.useState<string[]>([]);
 
   const { data: meeting, isLoading: meetingLoading } = useQuery({
     queryKey: ["meeting", meetingId],
@@ -292,6 +295,32 @@ export default function MeetingContextPage() {
     queryKey: ["tasks", { meeting_id: meetingId }],
     queryFn: () => api.getTasks({ meeting_id: meetingId, page_size: 500 }),
     enabled: !!meetingId,
+  });
+
+  const liveMutation = useMutation({
+    mutationFn: () => api.startLiveTranscript(meetingId),
+    onMutate: () => setLiveStatus("connecting"),
+    onSuccess: () => {
+      const socket = api.createLiveTranscriptWebSocket(meetingId);
+      socket.onopen = () => setLiveStatus("connected");
+      socket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === "live_transcript" && message.payload?.type === "transcript") {
+            const text = message.payload.text as string;
+            if (text) {
+              setLiveLines((lines) => [...lines.slice(-99), text]);
+            }
+            queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] });
+          }
+        } catch {
+          setLiveStatus("error");
+        }
+      };
+      socket.onerror = () => setLiveStatus("error");
+      socket.onclose = () => setLiveStatus("idle");
+    },
+    onError: () => setLiveStatus("error"),
   });
 
   if (meetingLoading) {
@@ -318,6 +347,25 @@ export default function MeetingContextPage() {
     <DashboardLayout>
       <div className="h-[calc(100vh-4rem)] flex flex-col">
         <MeetingHeader meeting={meeting} transcript={transcript} />
+        {meeting.status === "CAPTURING" && (
+          <Card className="mx-4 mb-4 border-red-200">
+            <CardContent className="flex items-center justify-between gap-4 py-3">
+              <div className="flex items-center gap-2 text-sm">
+                <Radio className="h-4 w-4 text-red-500" />
+                <span>Meeting capture is active.</span>
+                {liveStatus === "connected" && <Badge variant="outline">Live transcript connected</Badge>}
+              </div>
+              <Button size="sm" onClick={() => liveMutation.mutate()} disabled={liveMutation.isPending || liveStatus === "connected"}>
+                {liveMutation.isPending ? "Connecting..." : "Open live transcript"}
+              </Button>
+            </CardContent>
+            {liveLines.length > 0 && (
+              <CardContent className="border-t pt-3 text-sm text-muted-foreground">
+                {liveLines.slice(-3).map((line, index) => <p key={`${index}-${line}`}>{line}</p>)}
+              </CardContent>
+            )}
+          </Card>
+        )}
         
         <div className="flex-1 flex overflow-hidden">
           {/* Left: Transcript Player */}

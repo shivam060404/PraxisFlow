@@ -80,6 +80,14 @@ export default function AdminPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
+  const [tenantSettings, setTenantSettings] = useState({
+    data_region: "",
+    retention_days: "365",
+    monthly_llm_budget_usd: "0",
+    recording_consent_required: true,
+    phi_processing_enabled: false,
+  });
+  const [savingTenantSettings, setSavingTenantSettings] = useState(false);
 
   // Form states
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
@@ -115,6 +123,17 @@ export default function AdminPage() {
           users: users.status === "fulfilled" ? users.value : { users: [], total: 0 },
           integrations: integrations.status === "fulfilled" ? integrations.value : [],
         }));
+        if (tenant.status === "fulfilled") {
+          const tenantValue = tenant.value as any;
+          setTenantSettings(prev => ({
+            ...prev,
+            data_region: tenantValue.dataRegion || tenantValue.data_region || "",
+            retention_days: String(tenantValue.retentionDays ?? tenantValue.retention_days ?? 365),
+            monthly_llm_budget_usd: String(tenantValue.monthlyLlmBudgetUsd ?? tenantValue.monthly_llm_budget_usd ?? 0),
+            recording_consent_required: tenantValue.recordingConsentRequired ?? tenantValue.recording_consent_required ?? true,
+            phi_processing_enabled: tenantValue.phiProcessingEnabled ?? tenantValue.phi_processing_enabled ?? false,
+          }));
+        }
       } else if (activeTab === "audit") {
         const audit = await api.getAdminAuditLogs({ page, page_size: pageSize, action: search });
         setData(prev => ({ ...prev, auditLogs: audit }));
@@ -136,6 +155,24 @@ export default function AdminPage() {
       console.error("Failed to load admin data:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveTenantSettings = async () => {
+    setSavingTenantSettings(true);
+    try {
+      await api.updateTenant({
+        data_region: tenantSettings.data_region || undefined,
+        retention_days: Number(tenantSettings.retention_days),
+        monthly_llm_budget_usd: Number(tenantSettings.monthly_llm_budget_usd),
+        recording_consent_required: tenantSettings.recording_consent_required,
+        phi_processing_enabled: tenantSettings.phi_processing_enabled,
+      });
+      await loadAdminData();
+    } catch (error) {
+      console.error("Failed to update tenant settings:", error);
+    } finally {
+      setSavingTenantSettings(false);
     }
   };
 
@@ -365,6 +402,47 @@ export default function AdminPage() {
                 <Download className="h-6 w-6" />
                 <span className="text-sm">Export Data</span>
               </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="mt-4">
+            <CardHeader>
+              <CardTitle>Trust, retention & AI budget</CardTitle>
+              <CardDescription>Tenant-wide controls used by meeting capture and processing.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <div>
+                <Label htmlFor="data-region">Data region</Label>
+                <Input id="data-region" placeholder="us-east" value={tenantSettings.data_region}
+                  onChange={(e) => setTenantSettings({ ...tenantSettings, data_region: e.target.value })} />
+              </div>
+              <div>
+                <Label htmlFor="retention-days">Retention (days)</Label>
+                <Input id="retention-days" type="number" min={1} max={3650} value={tenantSettings.retention_days}
+                  onChange={(e) => setTenantSettings({ ...tenantSettings, retention_days: e.target.value })} />
+              </div>
+              <div>
+                <Label htmlFor="llm-budget">Monthly LLM budget (USD)</Label>
+                <Input id="llm-budget" type="number" min={0} step="0.01" value={tenantSettings.monthly_llm_budget_usd}
+                  onChange={(e) => setTenantSettings({ ...tenantSettings, monthly_llm_budget_usd: e.target.value })} />
+              </div>
+              <div className="flex flex-col justify-end gap-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={tenantSettings.recording_consent_required}
+                    onChange={(e) => setTenantSettings({ ...tenantSettings, recording_consent_required: e.target.checked })} />
+                  Require recording consent before capture
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={tenantSettings.phi_processing_enabled}
+                    onChange={(e) => setTenantSettings({ ...tenantSettings, phi_processing_enabled: e.target.checked })} />
+                  Enable PHI processing
+                </label>
+              </div>
+              <div className="md:col-span-2">
+                <Button onClick={saveTenantSettings} disabled={savingTenantSettings}>
+                  {savingTenantSettings ? "Saving..." : "Save tenant controls"}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

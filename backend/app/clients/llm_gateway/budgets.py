@@ -9,6 +9,7 @@ when Redis is unreachable.
 
 import time
 import logging
+import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Any
 from collections import defaultdict
@@ -59,6 +60,8 @@ class TokenBudgetManager:
         self._redis_loop = None
         self._redis_available = False
         self._initialized = False
+        self._monthly_local: Dict[str, int] = {}
+        self._monthly_lock = asyncio.Lock()
 
     async def initialize(self):
         """Connect to Redis if configured; degrade gracefully otherwise."""
@@ -70,7 +73,13 @@ class TokenBudgetManager:
             self._redis_available = True
             logger.info("Budget manager: Redis backend")
         except Exception as e:
-            logger.warning(f"Budget manager: Redis unavailable ({e}); using in-process counters")
+            if (
+                settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE
+                and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+            ):
+                logger.error("Budget manager: Redis unavailable in production-like environment: %s", e)
+            else:
+                logger.warning(f"Budget manager: Redis unavailable ({e}); using in-process counters")
             self._redis = None
             self._redis_available = False
         self._initialized = True
@@ -124,10 +133,100 @@ class TokenBudgetManager:
 
     async def check_budget(self, tenant_id: str, estimated_tokens: int) -> bool:
         """Return True if the request fits within the tenant's hard limit."""
+        if not self._initialized:
+            await self.initialize()
+        if (
+            not self._redis_available
+            and settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE
+            and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+        ):
+            raise BudgetBackendUnavailableError("Shared budget backend is unavailable")
         used = await self._get_used("tenant", tenant_id)
         return used + estimated_tokens <= self.configs["tenant"].hard_limit
 
-    async def record_usage(self, scope: str, identifier: str, tokens: int):
+    async def reserve_monthly_cost(
+        self, tenant_id: str, limit_usd: float, amount_usd: float,
+        initial_spent_usd: float = 0,
+    ) -> bool:
+        """Atomically reserve monthly spend before sending a provider request.
+
+        Redis's Lua execution makes the check-and-increment one operation across
+        workers. Reservations are deliberately conservative: an abandoned
+        reservation expires with the month rather than allowing overspend.
+        """
+        if amount_usd < 0 or limit_usd < 0:
+            raise ValueError("monthly budget values must be non-negative")
+        if not self._initialized:
+            await self.initialize()
+        month = time.strftime("%Y%m", time.gmtime())
+        key = f"llm-monthly-budget:{tenant_id}:{month}"
+        # Store micro-dollars to avoid Redis floating point comparisons.
+        amount = int(round(amount_usd * 1_000_000))
+        limit = int(round(limit_usd * 1_000_000))
+        initial = int(round(initial_spent_usd * 1_000_000))
+        if self._redis_available:
+            try:
+                redis = await self._get_redis()
+                await redis.set(key, initial, nx=True, ex=35 * 86400)
+                script = (
+                    "local current=tonumber(redis.call('GET',KEYS[1]) or '0'); "
+                    "local amount=tonumber(ARGV[1]); local limit=tonumber(ARGV[2]); "
+                    "if current + amount > limit then return 0 end; "
+                    "redis.call('INCRBY',KEYS[1],amount); return 1"
+                )
+                return bool(await redis.eval(script, 1, key, amount, limit))
+            except Exception as exc:
+                if settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}:
+                    raise BudgetBackendUnavailableError("Shared monthly budget backend is unavailable") from exc
+                logger.warning("Monthly budget reservation failed (%s); using local counter", exc)
+                self._redis_available = False
+        if (
+            not self._redis_available
+            and settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE
+            and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+        ):
+            raise BudgetBackendUnavailableError("Shared monthly budget backend is unavailable")
+        async with self._monthly_lock:
+            current = self._monthly_local.get(key, initial)
+            if current + amount > limit:
+                return False
+            self._monthly_local[key] = current + amount
+            return True
+
+    async def settle_monthly_cost(
+        self, tenant_id: str, reserved_usd: float, actual_usd: float
+    ) -> None:
+        """Replace a reservation with actual cost, atomically where shared."""
+        month = time.strftime("%Y%m", time.gmtime())
+        key = f"llm-monthly-budget:{tenant_id}:{month}"
+        reserved = int(round(reserved_usd * 1_000_000))
+        actual = int(round(actual_usd * 1_000_000))
+        if reserved < 0 or actual < 0:
+            raise ValueError("monthly costs must be non-negative")
+        if self._redis_available:
+            try:
+                redis = await self._get_redis()
+                script = (
+                    "local current=tonumber(redis.call('GET',KEYS[1]) or '0'); "
+                    "redis.call('SET',KEYS[1],current-tonumber(ARGV[1])+tonumber(ARGV[2])); return 1"
+                )
+                await redis.eval(script, 1, key, reserved, actual)
+                return
+            except Exception as exc:
+                if settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}:
+                    raise BudgetBackendUnavailableError("Shared monthly budget backend is unavailable") from exc
+                logger.warning("Monthly budget settlement failed (%s)", exc)
+                self._redis_available = False
+        if (
+            not self._redis_available
+            and settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE
+            and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+        ):
+            raise BudgetBackendUnavailableError("Shared monthly budget backend is unavailable")
+        async with self._monthly_lock:
+            self._monthly_local[key] = max(0, self._monthly_local.get(key, 0) - reserved + actual)
+
+    async def record_usage(self, scope: str, identifier=None, tokens=None):
         """
         Record token usage for a scope.
 
@@ -137,6 +236,9 @@ class TokenBudgetManager:
         # Legacy call shape: record_usage(tenant_id, tokens)
         if isinstance(identifier, int) and tokens is None:
             scope, identifier, tokens = "tenant", scope, identifier
+
+        if tokens is None or not isinstance(tokens, int) or tokens < 0:
+            raise ValueError("tokens must be a non-negative integer")
 
         config = self.configs[scope]
         key = f"{scope}:{identifier}"
@@ -150,6 +252,11 @@ class TokenBudgetManager:
                     await r.expire(day_key, config.reset_interval_seconds * 2)
                 used = new_total
             except Exception as e:
+                if (
+                    settings.LLM_FAIL_CLOSED_ON_BUDGET_BACKEND_FAILURE
+                    and settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}
+                ):
+                    raise BudgetBackendUnavailableError("Shared budget backend is unavailable") from e
                 logger.warning(f"Budget write failed ({e}); using local counter")
                 self._redis_available = False
                 used = None
@@ -195,3 +302,7 @@ class TokenBudgetManager:
     def set_config(self, scope: str, config: BudgetConfig):
         """Update budget configuration for a scope."""
         self.configs[scope] = config
+
+
+class BudgetBackendUnavailableError(RuntimeError):
+    """Raised when shared budget state cannot be trusted."""

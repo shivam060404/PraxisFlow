@@ -15,6 +15,12 @@ model Tenant {
   slug      String   @unique
   plan      String   @default("starter")
   status    String   @default("active")
+  dataRegion String  @default("us")
+  kmsKeyArn String?
+  retentionDays Int  @default(2555)
+  recordingConsentRequired Boolean @default(true)
+  phiProcessingEnabled Boolean @default(false)
+  monthlyLlmBudgetUsd Float @default(500)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -22,9 +28,16 @@ model Tenant {
   meetings     Meeting[]
   integrations Integration[]
   tasks        Task[]
+  taskOutbox   TaskOutbox[]
+  webhookEvents IntegrationWebhookEvent[]
   dataSubjectRequests  DataSubjectRequest[]
   complianceExports    ComplianceExport[]
   aiAuditLogs  AiAuditLog[]
+  calendars    CalendarConnection[]
+  captures     MeetingCapture[]
+  calendarEvents CalendarEvent[]
+  notificationDeliveries NotificationDelivery[]
+  llmUsageRecords LLMUsageRecord[]
 
   @@index([slug])
 }
@@ -74,18 +87,164 @@ model Meeting {
   tasks      Task[]
   flags      MeetingFlag[]
   aiAuditLogs AiAuditLog[]
+  captures MeetingCapture[]
+  calendarEvent CalendarEvent?
+  consentStatus String @default("unknown")
+  notificationDeliveries NotificationDelivery[]
 
   @@index([tenantId, status])
   @@index([tenantId, scheduledAt])
 }
 
 enum MeetingStatus {
+  SCHEDULED
+  CAPTURING
   UPLOADED
   PROCESSING
   TRANSCRIBED
   EXTRACTED
   COMPLETED
   ERROR
+}
+
+model CalendarConnection {
+  id              String                    @id @default(uuid())
+  tenantId        String
+  provider        CalendarProvider
+  externalAccount String
+  accessTokenRef  String                    @db.Text
+  refreshTokenRef String?                   @db.Text
+  tokenExpiresAt  DateTime?
+  syncCursor      String?
+  status          CalendarConnectionStatus   @default(ACTIVE)
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  events CalendarEvent[]
+
+  @@unique([tenantId, provider, externalAccount])
+  @@index([tenantId, status])
+}
+
+model CalendarEvent {
+  id              String   @id @default(uuid())
+  tenantId        String
+  connectionId    String
+  externalEventId String
+  meetingId       String?  @unique
+  title           String
+  description     String?
+  scheduledAt     DateTime
+  durationMinutes Int?
+  organizerEmail  String?
+  joinUrl         String?
+  status          String   @default("confirmed")
+  rawPayload      Json?
+  lastSeenAt      DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant     Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  connection CalendarConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  meeting    Meeting?           @relation(fields: [meetingId], references: [id])
+
+  @@unique([connectionId, externalEventId])
+  @@index([tenantId, scheduledAt])
+}
+
+enum CalendarProvider {
+  google
+  microsoft
+}
+
+enum CalendarConnectionStatus {
+  ACTIVE
+  REAUTH_REQUIRED
+  DISCONNECTED
+}
+
+model NotificationDelivery {
+  id            String              @id @default(uuid())
+  tenantId      String
+  meetingId     String
+  channel       NotificationChannel
+  recipient     String
+  status        NotificationStatus   @default(PENDING)
+  attempts      Int                 @default(0)
+  availableAt   DateTime            @default(now())
+  lastAttemptAt DateTime?
+  sentAt        DateTime?
+  lastError     String?             @db.Text
+  idempotencyKey String             @unique
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@index([tenantId, meetingId])
+}
+
+enum NotificationChannel {
+  email
+  slack
+  teams
+}
+
+enum NotificationStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  DEAD_LETTER
+}
+
+// ─── Ambient meeting capture lifecycle ───
+// The vendor bot is intentionally represented as an external resource. This
+// keeps Recall.ai/Fireflies-specific APIs outside the core meeting domain.
+model MeetingCapture {
+  id              String              @id @default(uuid())
+  tenantId        String
+  meetingId       String
+  provider        CaptureProvider
+  externalBotId   String
+  status          CaptureStatus       @default(SCHEDULED)
+  scheduledFor    DateTime?
+  attempts        Int                 @default(0)
+  lastAttemptAt   DateTime?
+  recordingUrl    String?
+  startedAt       DateTime?
+  endedAt         DateTime?
+  lastEventAt     DateTime?
+  webhookSecret   String
+  rawPayload      Json?
+  errorMessage    String?             @db.Text
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, externalBotId])
+  @@index([tenantId, status])
+  @@index([meetingId])
+}
+
+enum CaptureProvider {
+  recall
+  fireflies
+}
+
+enum CaptureStatus {
+  SCHEDULING
+  SCHEDULED
+  JOINING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  CANCELLED
 }
 
 // ─── Attendees ───
@@ -191,6 +350,7 @@ model Task {
   integration Integration? @relation(fields: [integrationId], references: [id])
   auditLogs  TaskAuditLog[]
   aiAuditLogs AiAuditLog[]
+  outboxEvents TaskOutbox[]
 
   @@index([tenantId, status])
   @@index([tenantId, assigneeId])
@@ -262,9 +422,91 @@ model Integration {
 
   tenant Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tasks  Task[]
+  outboxEvents TaskOutbox[]
+  webhookEvents IntegrationWebhookEvent[]
 
   @@unique([tenantId, provider])
   @@index([tenantId])
+}
+
+// ─── Durable inbound integration webhooks ───
+// The provider request is acknowledged only after this record is committed.
+// Processing is asynchronous and idempotent so provider retries are safe.
+model IntegrationWebhookEvent {
+  id             String              @id @default(uuid())
+  tenantId       String
+  integrationId  String
+  provider       IntegrationProvider
+  deliveryKey    String
+  externalId     String?
+  externalStatus String?
+  externalUrl    String?
+  changedAt      DateTime?
+  payload        Json
+  status         WebhookEventStatus  @default(PENDING)
+  attempts       Int                 @default(0)
+  availableAt    DateTime            @default(now())
+  lockedAt       DateTime?
+  processedAt    DateTime?
+  lastError      String?             @db.Text
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, deliveryKey])
+  @@index([status, availableAt])
+  @@index([tenantId, createdAt])
+}
+
+enum WebhookEventStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+}
+
+// ─── Transactional integration outbox ───
+// Records are created in the same transaction as the local task mutation.
+// The relay may deliver an event more than once; idempotencyKey prevents
+// duplicate enqueueing and adapters must remain safe to retry.
+model TaskOutbox {
+  id             String          @id @default(uuid())
+  tenantId       String
+  taskId         String
+  integrationId  String
+  eventType      TaskOutboxEvent @default(CREATE)
+  status         OutboxStatus    @default(PENDING)
+  attempts       Int             @default(0)
+  availableAt    DateTime        @default(now())
+  lockedAt       DateTime?
+  processedAt    DateTime?
+  lastError      String?         @db.Text
+  idempotencyKey String          @unique
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  task        Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, integrationId, eventType])
+  @@index([status, availableAt])
+  @@index([tenantId, status])
+}
+
+enum TaskOutboxEvent {
+  CREATE
+  UPDATE
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  SYNCED
+  FAILED
 }
 
 enum IntegrationProvider {
@@ -273,6 +515,9 @@ enum IntegrationProvider {
   linear
   slack
   teams
+  github
+  salesforce
+  notion
 }
 
 // ─── AI Audit Logs ───
@@ -298,6 +543,31 @@ model AiAuditLog {
 
   @@index([tenantId, createdAt])
   @@index([taskId])
+  @@index([meetingId])
+}
+
+model LLMUsageRecord {
+  id              String   @id @default(uuid())
+  // Stable request correlation key. Retries must not create a second ledger row.
+  correlationId   String?  @unique
+  tenantId        String
+  userId          String?
+  meetingId       String?
+  pipelineRunId   String?
+  pipelineNode    String
+  provider        String
+  model           String
+  promptTokens    Int      @default(0)
+  completionTokens Int     @default(0)
+  totalTokens     Int      @default(0)
+  costUsd         Float    @default(0)
+  cached          Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, model, createdAt])
   @@index([meetingId])
 }
 

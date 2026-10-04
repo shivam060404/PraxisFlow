@@ -87,7 +87,12 @@ class SlackVerifier(WebhookVerifier):
             return WebhookVerificationResult(valid=False, error="Missing Slack headers")
         
         # Check timestamp (prevent replay attacks)
-        if abs(int(timestamp) - int(datetime.utcnow().timestamp())) > 300:
+        try:
+            timestamp_value = int(timestamp)
+        except ValueError:
+            return WebhookVerificationResult(valid=False, error="Invalid Slack timestamp")
+
+        if abs(timestamp_value - int(datetime.utcnow().timestamp())) > 300:
             return WebhookVerificationResult(valid=False, error="Request timestamp too old")
         
         body = await request.body()
@@ -208,14 +213,32 @@ async def receive_webhook(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Dispatch to integration handler
+    # Persist before processing. Provider retries are deduplicated by the
+    # provider delivery ID when present, otherwise by a body hash.
     try:
         adapter = IntegrationAdapterFactory.get_adapter(provider_l)
         event = adapter.normalize_webhook(payload)
+        request_id = (
+            request.headers.get("X-Request-ID")
+            or request.headers.get("X-Webhook-ID")
+            or request.headers.get("X-GitHub-Delivery")
+            or request.headers.get("X-Linear-Delivery")
+        )
+        from app.services.webhook_events import delivery_key, persist_webhook_event
+        from app.workers.tasks import process_webhook_event
 
-        await _process_webhook_event(provider_l, event, integration)
+        stored, created = await persist_webhook_event(
+            integration=integration,
+            provider=provider_l,
+            key=delivery_key(provider_l, await request.body(), request_id),
+            normalized=event,
+            payload=payload,
+            db=db,
+        )
+        if created:
+            process_webhook_event.delay(stored.id)
 
-        return {"status": "ok"}
+        return {"status": "accepted", "event_id": stored.id, "duplicate": not created}
 
     except HTTPException:
         raise
@@ -277,6 +300,16 @@ async def _process_webhook_event(provider: str, event, integration):
 
 def _map_external_status(provider: str, status: str) -> str:
     """Map external status to PraxisFlow status."""
+    normalized = str(status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    canonical = {
+        "todo": "EXTRACTED",
+        "in_progress": "ASSIGNED",
+        "in_review": "SYNCED",
+        "done": "COMPLETED",
+        "cancelled": "DISMISSED",
+    }
+    if normalized in canonical:
+        return canonical[normalized]
     mappings = {
         "jira": {
             "To Do": "EXTRACTED",

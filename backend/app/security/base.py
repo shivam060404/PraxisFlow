@@ -143,8 +143,10 @@ class OPAPolicyEngine(PolicyEngine):
         self.opa_url = opa_url
     
     async def evaluate(self, subject: Subject, resource: Resource, action: Action) -> AuthorizationDecision:
-        # Placeholder - would call OPA HTTP API
-        return AuthorizationDecision(allowed=True, reason="OPA evaluation not implemented")
+        return AuthorizationDecision(
+            allowed=False,
+            reason="OPA policy evaluation is not configured",
+        )
 
 
 class RBACManager:
@@ -201,8 +203,10 @@ class ABACManager:
         action: Action,
         policies: List[Dict[str, Any]],
     ) -> AuthorizationDecision:
-        # Placeholder - would evaluate ABAC policies
-        return AuthorizationDecision(allowed=True, reason="ABAC evaluation not implemented")
+        return AuthorizationDecision(
+            allowed=False,
+            reason="ABAC policy evaluation is not configured",
+        )
 
 
 class AuthorizationService:
@@ -231,14 +235,14 @@ class AuthorizationService:
         if subject.has_permission(permission):
             return AuthorizationDecision(allowed=True, reason="Explicit permission granted")
         
-        # Check resource ownership
-        if resource.owner_id and resource.owner_id == subject.id:
-            return AuthorizationDecision(allowed=True, reason="Resource owner")
-        
         # Check tenant isolation
         if subject.tenant_id != resource.tenant_id:
             return AuthorizationDecision(allowed=False, reason="Cross-tenant access denied")
         
+        # Check resource ownership only after tenant isolation.
+        if resource.owner_id and resource.owner_id == subject.id:
+            return AuthorizationDecision(allowed=True, reason="Resource owner")
+
         return AuthorizationDecision(allowed=False, reason="No matching permission")
 
 
@@ -265,9 +269,10 @@ async def get_current_subject(request: Request) -> Subject:
     TenantIsolationMiddleware. Falls back to verifying the Authorization
     header directly (e.g. when the middleware was bypassed in tests).
 
-    The role comes from the token claim (normalized); the DB row remains the
-    source of truth for user lifecycle but is intentionally not queried here
-    to keep the hot path free of an extra round trip.
+    The token supplies identity, while the database is the source of truth for
+    tenant membership and user lifecycle. This check is intentionally on the
+    authenticated request path so suspended/deleted users are revoked without
+    waiting for token expiry.
     """
     from app.security.auth import verify_access_token, extract_bearer_token, AuthError
 
@@ -290,6 +295,18 @@ async def get_current_subject(request: Request) -> Subject:
                 detail=f"Invalid token: {e}",
             )
         tenant_id, user_id, role = verified.tenant_id, verified.user_id, verified.role
+
+    from app.db.prisma import get_prisma
+
+    db = await get_prisma()
+    user = await db.user.find_first(
+        where={"id": user_id, "tenantId": tenant_id}
+    )
+    if not user or user.status != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user is inactive or no longer belongs to this tenant",
+        )
 
     try:
         role_enum = Role(role)

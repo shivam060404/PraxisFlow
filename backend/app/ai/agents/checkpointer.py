@@ -7,8 +7,9 @@ Backends:
     processes. Requires DATABASE_URL.
   - "memory": in-process MemorySaver (single-instance dev only).
 
-The backend is selected with CHECKPOINTER_BACKEND (default: postgres, with
-automatic fallback to memory if Postgres setup fails — logged loudly).
+The backend is selected with CHECKPOINTER_BACKEND (default: postgres).
+Production never falls back to memory because that would silently lose HITL
+state on restart.
 """
 
 import logging
@@ -25,12 +26,17 @@ _pool = None
 def get_shared_checkpointer():
     """Return the initialized checkpointer.
 
-    Falls back to a fresh MemorySaver when init hasn't run yet (import-time
-    graph building in tests) so callers never crash — but production paths
-    must call init_checkpointer() during startup.
+    A memory checkpointer is allowed only for explicit development/test
+    configuration. Production callers fail closed if startup initialization
+    did not complete.
     """
     global _checkpointer
     if _checkpointer is None:
+        if settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}:
+            raise RuntimeError(
+                "LangGraph checkpointer is not initialized; refusing to run "
+                "without durable HITL state"
+            )
         from langgraph.checkpoint.memory import MemorySaver
 
         _checkpointer = MemorySaver()
@@ -71,9 +77,14 @@ async def init_checkpointer() -> None:
             logger.info("LangGraph checkpointer: postgres backend ready")
             return
         except Exception as e:
-            logger.error(
-                f"Postgres checkpointer init failed ({e}); "
-                "falling back to in-memory MemorySaver"
+            if settings.ENVIRONMENT.lower() in {"production", "prod", "staging"}:
+                logger.critical("Postgres checkpointer initialization failed: %s", e)
+                raise RuntimeError(
+                    "Durable LangGraph checkpointer initialization failed"
+                ) from e
+            logger.warning(
+                "Postgres checkpointer initialization failed in non-production: %s",
+                e,
             )
 
     # memory backend or fallback

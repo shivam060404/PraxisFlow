@@ -10,8 +10,38 @@ from app.schemas import (
 )
 from app.security import get_current_subject, Subject
 from app.integrations.factory import IntegrationAdapterFactory
+from app.services.provider_installation import installation_url, validate_installation_state, exchange_installation
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
+
+
+@router.get("/oauth/{provider}/authorize")
+async def begin_provider_install(provider: str, subject: Subject = Depends(get_current_subject)):
+    if provider not in {"slack", "teams"}:
+        raise HTTPException(status_code=400, detail="Unsupported installation provider")
+    try:
+        return {"authorization_url": installation_url(provider, subject.tenant_id)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/oauth/{provider}/callback")
+async def complete_provider_install(provider: str, code: str, state: str, db=Depends(get_db)):
+    if provider not in {"slack", "teams"}:
+        raise HTTPException(status_code=400, detail="Unsupported installation provider")
+    try:
+        tenant_id = validate_installation_state(state, provider)
+        payload = await exchange_installation(provider, code)
+        identity = payload.get("team", {}) or payload.get("team_id") or payload.get("tenant", {})
+        config = {"installation": payload, "identity": identity}
+        return await db.integration.upsert(
+            where={"tenantId_provider": {"tenantId": tenant_id, "provider": provider}},
+            data={"create": {"tenantId": tenant_id, "provider": provider,
+                    "displayName": provider.title(), "config": config, "status": "ACTIVE"},
+                  "update": {"config": config, "status": "ACTIVE"}},
+        )
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("", response_model=Integration, status_code=status.HTTP_201_CREATED)
@@ -56,7 +86,7 @@ async def list_integrations(
     db=Depends(get_db),
 ):
     """List all integrations for the current tenant."""
-    total = await db.integration.count()
+    total = await db.integration.count(where={"tenantId": subject.tenant_id})
     integrations = await db.integration.find_many(
         where={"tenantId": subject.tenant_id},
         skip=(page - 1) * page_size,
@@ -80,8 +110,8 @@ async def get_integration(
     db=Depends(get_db),
 ):
     """Get a single integration."""
-    integration = await db.integration.find_unique(
-        where={"id": str(integration_id)},
+    integration = await db.integration.find_first(
+        where={"id": str(integration_id), "tenantId": subject.tenant_id},
     )
     
     if not integration:

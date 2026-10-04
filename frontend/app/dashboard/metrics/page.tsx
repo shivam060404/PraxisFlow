@@ -210,35 +210,36 @@ export default function MetricsPage() {
     queryFn: () => api.getMetrics(),
   });
 
-  // Mock data for now since endpoint doesn't exist yet
-  const mockMetrics: MetricsData = {
-    totalMeetings: 142,
-    totalTasksExtracted: 1250,
-    verificationRate: 78,
-    avgTimeToSync: 12,
-    accuracyByWeek: [
-      { week: "Week 1", precision: 0.72, recall: 0.68, f1: 0.70 },
-      { week: "Week 2", precision: 0.75, recall: 0.71, f1: 0.73 },
-      { week: "Week 3", precision: 0.78, recall: 0.74, f1: 0.76 },
-      { week: "Week 4", precision: 0.81, recall: 0.77, f1: 0.79 },
-    ],
-    funnelData: [
-      { stage: "Extracted", count: 1250 },
-      { stage: "Verified", count: 975 },
-      { stage: "Assigned", count: 850 },
-      { stage: "Synced", count: 720 },
-      { stage: "Completed", count: 580 },
-    ],
-    teamPerformance: [
-      { teamMember: "Sarah Chen", meetingsAttended: 24, tasksAssigned: 45, tasksCompleted: 38, avgCompletionTime: 2.3, overdueRate: 5 },
-      { teamMember: "Mike Johnson", meetingsAttended: 18, tasksAssigned: 32, tasksCompleted: 25, avgCompletionTime: 3.1, overdueRate: 12 },
-      { teamMember: "Emily Davis", meetingsAttended: 31, tasksAssigned: 58, tasksCompleted: 52, avgCompletionTime: 1.8, overdueRate: 3 },
-      { teamMember: "James Wilson", meetingsAttended: 15, tasksAssigned: 28, tasksCompleted: 19, avgCompletionTime: 4.2, overdueRate: 25 },
-      { teamMember: "Lisa Anderson", meetingsAttended: 22, tasksAssigned: 41, tasksCompleted: 35, avgCompletionTime: 2.7, overdueRate: 8 },
-    ],
-  };
+  const displayMetrics = metrics as MetricsData | undefined;
 
-  const displayMetrics = metrics || mockMetrics;
+  if (isLoading) {
+    return (
+      <DashboardLayout>
+        <div className="flex h-64 items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!displayMetrics) {
+    return (
+      <DashboardLayout>
+        <Card>
+          <CardHeader>
+            <CardTitle>Metrics unavailable</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Operational metrics could not be loaded. No placeholder data is
+              shown because usage and performance figures must come from the
+              tenant-scoped backend.
+            </p>
+          </CardContent>
+        </Card>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>

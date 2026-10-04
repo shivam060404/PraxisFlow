@@ -43,6 +43,7 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
     # (/webhooks/register) and HITL paths (/webhooks/hitl/*) stay JWT-gated.
     WEBHOOK_RECEIVER_PREFIX = "/api/v1/webhooks/"
     WEBHOOK_RECEIVER_PROVIDERS = {"jira", "asana", "linear", "github", "slack", "teams", "gitlab"}
+    SIGNED_NOTIFICATION_PREFIX = "/api/v1/notifications/actions/"
 
     def _is_webhook_receiver(self, request: Request) -> bool:
         path = request.url.path
@@ -58,6 +59,9 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
 
         # Provider webhook receivers are HMAC-authenticated inside the router
         if self._is_webhook_receiver(request):
+            return await call_next(request)
+        # HITL notification links authenticate with an HMAC token in the URL.
+        if request.url.path.startswith(self.SIGNED_NOTIFICATION_PREFIX):
             return await call_next(request)
 
         # Extract tenant from Authorization header

@@ -154,8 +154,31 @@ class ApiClient {
     return this.http.post(`/meetings/${id}/process`);
   }
 
+  async recordMeetingConsent(id: string) {
+    return this.http.post(`/meetings/${id}/consent`);
+  }
+
   async getMeetingStatus(id: string) {
     return this.http.get(`/meetings/${id}/status`);
+  }
+
+  async startLiveTranscript(meetingId: string) {
+    return this.http.post(`/live-transcripts/sessions/${meetingId}`);
+  }
+
+  async stopLiveTranscript(meetingId: string) {
+    return this.http.delete(`/live-transcripts/sessions/${meetingId}`);
+  }
+
+  createLiveTranscriptWebSocket(meetingId: string): WebSocket {
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem(TOKEN_KEY) ?? ""
+        : "";
+    return new WebSocket(
+      `${wsUrl}/api/v1/live-transcripts/ws/${meetingId}?token=${encodeURIComponent(token)}`
+    );
   }
 
   // ─── Tasks ───
@@ -346,6 +369,10 @@ class ApiClient {
     return this.http.post(`/integrations/${id}/test`);
   }
 
+  async getProviderInstallationUrl(provider: "slack" | "teams") {
+    return this.http.get(`/integrations/oauth/${provider}/authorize`);
+  }
+
   async triggerIntegrationSync(id: string) {
     return this.http.post(`/integrations/${id}/sync`);
   }
@@ -375,6 +402,14 @@ class ApiClient {
 
   async getTenantUsage() {
     return this.http.get("/admin/tenant/usage");
+  }
+
+  async createCalendarConnection(data: CalendarConnectionCreate) {
+    return this.http.post("/calendar/connections", data);
+  }
+
+  async syncCalendarEvent(connectionId: string, event: Record<string, unknown>) {
+    return this.http.post(`/calendar/connections/${connectionId}/events`, { event });
   }
 
   async getTenantUsers(params?: {
@@ -542,6 +577,7 @@ export interface Meeting {
   status: string;
   audio_url?: string;
   recording_source: string;
+  consent_status?: string;
   calendar_event_id?: string;
   created_at: string;
   updated_at: string;
@@ -689,6 +725,19 @@ export interface TenantSettingsUpdate {
   plan?: string;
   status?: string;
   settings?: Record<string, unknown>;
+  data_region?: string;
+  kms_key_arn?: string;
+  retention_days?: number;
+  recording_consent_required?: boolean;
+  phi_processing_enabled?: boolean;
+  monthly_llm_budget_usd?: number;
+}
+
+export interface CalendarConnectionCreate {
+  provider: "google" | "microsoft";
+  external_account: string;
+  access_token_ref: string;
+  refresh_token_ref?: string;
 }
 
 export interface UserInvite {

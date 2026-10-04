@@ -22,46 +22,68 @@ async def create_task(
     db=Depends(get_db),
 ):
     """Create a new task (usually called by extraction pipeline)."""
-    task = await db.task.create(
-        data={
-            "tenantId": subject.tenant_id,
-            "meetingId": str(task_data.meeting_id),
-            "title": task_data.title,
-            "description": task_data.description,
-            "taskType": task_data.task_type,
-            "priority": task_data.priority,
-            "assigneeHint": task_data.assignee_hint,
-            "assigneeId": str(task_data.assignee_id) if task_data.assignee_id else None,
-            "assigneeResolvedBy": task_data.assignee_resolved_by,
-            "deadlineHint": task_data.deadline_hint,
-            "deadlineDate": task_data.deadline_date,
-            "deadlineResolvedBy": task_data.deadline_resolved_by,
-            "transcriptWordStart": task_data.transcript_word_start,
-            "transcriptWordEnd": task_data.transcript_word_end,
-            "sourceQuote": task_data.source_quote,
-            "verificationStatus": task_data.verification_status,
-            "verificationReasoning": task_data.verification_reasoning,
-            "extractionConfidence": task_data.extraction_confidence,
-            "externalId": task_data.external_id,
-            "externalUrl": task_data.external_url,
-            "integrationId": str(task_data.integration_id) if task_data.integration_id else None,
-            "lastSyncedAt": task_data.last_synced_at,
-            "syncStatus": task_data.sync_status,
-            "createdBy": task_data.created_by,
-            "status": task_data.status or "EXTRACTED",
-        }
+    meeting = await db.meeting.find_first(
+        where={"id": str(task_data.meeting_id), "tenantId": subject.tenant_id}
     )
-    
-    # Create audit log entry
-    await db.taskauditlog.create(
-        data={
-            "taskId": task.id,
-            "newStatus": task.status,
-            "changedBy": task_data.created_by,
-            "reason": "Task created by AI extraction",
-        }
-    )
-    
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    integration = None
+    if task_data.integration_id:
+        integration = await db.integration.find_first(
+            where={
+                "id": str(task_data.integration_id),
+                "tenantId": subject.tenant_id,
+                "status": "ACTIVE",
+            }
+        )
+        if not integration:
+            raise HTTPException(status_code=404, detail="Integration not found")
+
+    async with db.tx() as tx:
+        task = await tx.task.create(
+            data={
+                "tenantId": subject.tenant_id,
+                "meetingId": str(task_data.meeting_id),
+                "title": task_data.title,
+                "description": task_data.description,
+                "taskType": task_data.task_type,
+                "priority": task_data.priority,
+                "assigneeHint": task_data.assignee_hint,
+                "assigneeId": str(task_data.assignee_id) if task_data.assignee_id else None,
+                "assigneeResolvedBy": task_data.assignee_resolved_by,
+                "deadlineHint": task_data.deadline_hint,
+                "deadlineDate": task_data.deadline_date,
+                "deadlineResolvedBy": task_data.deadline_resolved_by,
+                "transcriptWordStart": task_data.transcript_word_start,
+                "transcriptWordEnd": task_data.transcript_word_end,
+                "sourceQuote": task_data.source_quote,
+                "verificationStatus": task_data.verification_status,
+                "verificationReasoning": task_data.verification_reasoning,
+                "extractionConfidence": task_data.extraction_confidence,
+                "externalId": task_data.external_id,
+                "externalUrl": task_data.external_url,
+                "integrationId": str(task_data.integration_id) if task_data.integration_id else None,
+                "lastSyncedAt": task_data.last_synced_at,
+                "syncStatus": task_data.sync_status,
+                "createdBy": task_data.created_by,
+                "status": task_data.status or "EXTRACTED",
+            }
+        )
+
+        await tx.taskauditlog.create(
+            data={
+                "taskId": task.id,
+                "newStatus": task.status,
+                "changedBy": task_data.created_by,
+                "reason": "Task created by AI extraction",
+            }
+        )
+        if integration:
+            from app.services.task_outbox import enqueue_task_sync
+
+            await enqueue_task_sync(task, integration, db=tx)
+
     return task
 
 

@@ -1,5 +1,10 @@
 # PraxisFlow Compliance Framework
-# EU AI Act, GDPR, SOC 2, ISO 27001 Implementation Guide
+# Control inventory and evidence status (not a certification)
+
+This document is an implementation inventory, not evidence of certification,
+legal compliance, signed contracts, or a completed conformity assessment.
+Statuses marked `Implemented` mean a code path exists; they do not mean the
+control is deployed, independently tested, or audited.
 
 ---
 
@@ -15,14 +20,14 @@ PraxisFlow is classified as a **High-Risk AI System** under Annex III:
 
 | EU AI Act Article | Requirement | PraxisFlow Implementation | Status |
 |-------------------|-------------|--------------------------|--------|
-| **Art. 9** | Risk Management System | AI Risk Register with quarterly reviews, incident tracking, mitigation procedures | ✅ Implemented |
-| **Art. 10** | Data Governance | Data lineage tracking, consent management, DPA with sub-processors, PII redaction pipeline | ✅ Implemented |
-| **Art. 11** | Technical Documentation | Model cards, system architecture docs, data flow diagrams, guardrail configs | ✅ Implemented |
-| **Art. 12** | Record Keeping | Immutable AI audit log (every LLM call), trace retention 7 years, tamper-evident storage | ✅ Implemented |
-| **Art. 13** | Transparency | User-facing AI disclosure, extraction confidence display, human review queue visibility | ✅ Implemented |
-| **Art. 14** | Human Oversight | HITL verification (confidence < 0.9), reviewer assignment, override capability, SLA tracking | ✅ Implemented |
+| **Art. 9** | Risk Management System | Risk-register and incident-process documentation | ⚪ Evidence required |
+| **Art. 10** | Data Governance | Consent and PII-redaction code paths; DPAs require legal verification | 🟡 Partial |
+| **Art. 11** | Technical Documentation | Model cards and architecture documentation | 🟡 Partial |
+| **Art. 12** | Record Keeping | AI audit and usage ledger code paths; retention/deployment evidence required | 🟡 Partial |
+| **Art. 13** | Transparency | UI confidence and review surfaces | 🟡 Partial |
+| **Art. 14** | Human Oversight | HITL verification and signed notification actions | 🟡 Partial |
 | **Art. 15** | Accuracy, Robustness, Cybersecurity | Continuous evals, adversarial testing, drift detection, pen testing, vulnerability management | 🟡 In Progress |
-| **Art. 16** | Obligations of Providers | Quality management, post-market monitoring, incident reporting (72h), conformity assessment | ✅ Implemented |
+| **Art. 16** | Obligations of Providers | Quality management and post-market obligations | ⚪ External/legal evidence required |
 
 ### 1.3 Conformity Assessment
 - **Internal Control**: Self-assessment with documented QMS
@@ -62,7 +67,7 @@ PraxisFlow is classified as a **High-Risk AI System** under Annex III:
 | **Object (Art. 21)** | Opt-out from AI processing, manual review only | `POST /api/v1/compliance/opt-out` | Immediate |
 
 ### 2.3 Data Protection Impact Assessment (DPIA)
-- **Completed**: Yes (high-risk processing: AI + employee monitoring)
+- **Completed**: No — draft technical risk inventory only
 - **Review Cycle**: Annual or on significant changes
 - **Key Risks Identified**:
   1. Automated decision-making affecting employment (mitigated: HITL required)
@@ -72,17 +77,17 @@ PraxisFlow is classified as a **High-Risk AI System** under Annex III:
 ### 2.4 Data Processing Agreements (DPAs)
 | Sub-processor | Purpose | DPA Status | Location |
 |---------------|---------|------------|----------|
-| Deepgram | ASR transcription | ✅ Signed | US/EU regions |
-| Groq | LLM inference (primary) | ✅ Signed | US |
-| OpenAI | LLM inference (fallback) | ✅ Signed | US |
-| Anthropic | LLM inference (fallback) | ✅ Signed | US |
-| AWS | Infrastructure | ✅ Signed | Global regions |
-| Pinecone/Qdrant | Vector storage | ✅ Signed | US/EU |
+| Deepgram | ASR transcription | ⚪ Legal verification required | Deployment-dependent |
+| Groq | LLM inference (primary) | ⚪ Legal verification required | Provider-dependent |
+| OpenAI | LLM inference (fallback) | ⚪ Legal verification required | Provider-dependent |
+| Anthropic | LLM inference (fallback) | ⚪ Legal verification required | Provider-dependent |
+| AWS | Infrastructure | ⚪ Contract/evidence required | Deployment-dependent |
+| Qdrant | Vector storage | ⚪ Contract/evidence required | Deployment-dependent |
 
 ### 2.5 International Transfers
-- **Standard Contractual Clauses (SCCs)**: In place for all non-EU subprocessors
-- **Transfer Impact Assessments**: Completed for US transfers post-Schrems II
-- **EU Data Residency**: Dedicated eu-west-1 region for EU tenants
+- **Standard Contractual Clauses (SCCs)**: Must be verified by counsel per subprocessor
+- **Transfer Impact Assessments**: Must be completed and maintained by the controller
+- **EU Data Residency**: Region policy fields exist; dedicated regional infrastructure is not provisioned by this repository
 - **No adequacy decision reliance**: SCCs + supplementary measures
 
 ---
@@ -177,20 +182,23 @@ PraxisFlow is classified as a **High-Risk AI System** under Annex III:
 ## 5. Implementation Checklist
 
 ### 5.1 Immediate (Pre-Launch)
-- [x] AI Risk Register documented
-- [x] Data Processing Agreements with all subprocessors
-- [x] DPIA completed and approved
-- [x] PII redaction pipeline operational
-- [x] Immutable audit logging implemented
-- [x] Human-in-the-loop verification active
-- [x] Data residency controls (EU region)
-- [x] Encryption at rest and in transit
-- [x] RBAC/ABAC with OPA policy engine
-- [x] Rate limiting and circuit breakers
-- [x] Vulnerability scanning in CI/CD
-- [x] Incident response plan documented
-- [x] Disaster recovery plan tested
-- [x] Penetration test scheduled
+The following are release prerequisites, not claims that they are complete in
+this repository. An owner must attach deployment and independent evidence
+before checking an item.
+- [ ] AI Risk Register reviewed and approved
+- [ ] Data Processing Agreements verified with every deployed subprocessor
+- [ ] DPIA completed and approved by the controller
+- [ ] PII redaction pipeline tested in the deployed data paths
+- [ ] Immutable audit logging independently validated
+- [ ] Human-in-the-loop verification tested operationally
+- [ ] Data residency controls provisioned and tested per tenant region
+- [ ] Encryption at rest/in transit and CMK rotation evidenced
+- [ ] RBAC/ABAC policy enforcement independently reviewed
+- [ ] Rate limiting and circuit breakers load-tested
+- [ ] Vulnerability scanning in CI/CD triaged and remediated
+- [ ] Incident response plan exercised
+- [ ] Disaster recovery plan tested
+- [ ] Penetration test completed
 
 ### 5.2 Ongoing (Post-Launch)
 - [ ] Monthly: AI accuracy monitoring (hallucination rate, faithfulness)

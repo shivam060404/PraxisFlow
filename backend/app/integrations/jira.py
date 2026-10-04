@@ -127,6 +127,23 @@ class JiraAdapter(IntegrationPort):
             response.raise_for_status()
             logger.info(f"Deleted Jira issue {external_id}")
 
+    async def reconcile_task(self, config: IntegrationConfig, task: Task) -> Optional[Dict[str, Any]]:
+        if not task.external_id:
+            return None
+        async with self._get_client(config) as client:
+            response = await client.get(f"/rest/api/3/issue/{task.external_id}", params={"fields": "status"})
+            if response.status_code == 404:
+                return {"missing": True, "external_id": task.external_id}
+            response.raise_for_status()
+            issue = response.json()
+            fields = issue.get("fields", {})
+            status = fields.get("status", {}).get("name")
+            return {
+                "external_id": issue.get("key", task.external_id),
+                "external_url": f"{self.base_url}/browse/{issue.get('key', task.external_id)}",
+                "status": self.normalize_status(status),
+            }
+
     def normalize_webhook(self, payload: Dict[str, Any]) -> NormalizedWebhookEvent:
         """Convert Jira webhook to normalized event."""
         issue = payload.get("issue", {})
@@ -138,20 +155,11 @@ class JiraAdapter(IntegrationPort):
             None
         )
 
-        status_map = {
-            "To Do": "todo",
-            "In Progress": "in_progress",
-            "In Review": "in_review",
-            "Done": "done",
-            "Closed": "done",
-            "Resolved": "done",
-        }
-
         new_status = "unknown"
         if status_change:
-            new_status = status_map.get(status_change.get("toString", ""), "unknown")
+            new_status = self.normalize_status(status_change.get("toString"))
         elif issue.get("fields", {}).get("status", {}).get("name"):
-            new_status = status_map.get(issue["fields"]["status"]["name"], "unknown")
+            new_status = self.normalize_status(issue["fields"]["status"]["name"])
 
         return NormalizedWebhookEvent(
             external_id=issue.get("key"),

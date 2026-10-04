@@ -70,6 +70,31 @@ class IntegrationPort(ABC):
         """Test integration connection."""
         return {"connected": False, "error": "Not implemented"}
 
+    async def reconcile_task(
+        self, config: IntegrationConfig, task: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Optionally fetch canonical remote state for durable reconciliation.
+
+        Providers that support read-after-write reconciliation can override this
+        hook. The default is deliberately a no-op rather than a fake provider
+        implementation.
+        """
+        return None
+
+    @staticmethod
+    def normalize_status(status: Any) -> str:
+        """Normalize provider status names to the adapter contract."""
+        value = str(status or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if value in {"done", "completed", "complete", "closed", "resolved", "cancelled", "canceled"}:
+            return "done" if value not in {"cancelled", "canceled"} else "cancelled"
+        if value in {"in_progress", "started", "working", "active"}:
+            return "in_progress"
+        if value in {"in_review", "review"}:
+            return "in_review"
+        if value in {"todo", "to_do", "backlog", "new", "unstarted", "open"}:
+            return "todo"
+        return "unknown"
+
     async def get_rate_limits(self) -> Dict[str, Any]:
         """Get rate limit configuration."""
         return {

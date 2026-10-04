@@ -5,7 +5,7 @@ An enterprise-grade agentic AI platform that transforms passive meeting recordin
 [![GitHub](https://img.shields.io/badge/GitHub-PraxisFlow-181717?logo=github)](https://github.com/shivam060404/PraxisFlow)
 [![CI/CD](https://img.shields.io/github/actions/workflow/status/shivam060404/PraxisFlow/ci.yml?branch=main)](https://github.com/shivam060404/PraxisFlow/actions)
 
-> **Status:** working end-to-end prototype — upload → transcribe → PII-redact → extract → verify → assign → sync. Compliance surfaces report verifiable facts only; formal certifications (SOC 2 / ISO 27001) have NOT been performed.
+> **Status:** production-shaped Phase 1–5 implementation. Upload and ambient capture, OAuth calendar sync, provider reconciliation, live Deepgram relay, durable outbox delivery, tenant policy controls, LLM budget accounting, ClickHouse projection, migrations, and CI gates are implemented. Cloud credentials, regional deployment, provider contracts, and independent compliance audits remain deployment prerequisites.
 
 ---
 
@@ -46,9 +46,10 @@ OBSERVABILITY: OpenTelemetry GenAI spans · Langfuse (optional)
 CHECKPOINTS: Postgres-backed LangGraph saver (HITL survives restarts)
 ```
 
-**Deliberately absent:** Kong/NGINX edge, Elasticsearch, ClickHouse, Jaeger,
-Sentry, PagerDuty, Helm charts. These are roadmap items, not implemented —
-the previous README listed them as if they existed.
+**Deployment-dependent:** regional AWS topology, customer-managed KMS grants,
+Cloudflare routing, provider OAuth credentials, billing/MRR integration,
+Kubernetes/Terraform, and independent SOC 2/HIPAA/GDPR evidence are not
+created by this repository.
 
 ---
 
@@ -68,10 +69,11 @@ the previous README listed them as if they existed.
 | **Task queue** | Celery (queues: `asr`, `extraction`, `integrations`) — single orchestrator |
 | **Events** | Kafka bus, publish-only (HITL/webhook notifications); Redis pub/sub for WebSocket fanout |
 | **Object storage** | MinIO (durable bucket/object refs; presigned URLs generated on demand) |
+| **Cost analytics** | ClickHouse append-only usage projection + Grafana datasource |
 | **Backend** | FastAPI, Pydantic v2, Prisma (Python client) |
 | **Frontend** | Next.js 15, TypeScript, TanStack Query, Zustand, shadcn-style UI |
 | **Auth** | Clerk RS256/JWKS (production) or local HS256 dev tokens (`POST /auth/dev-token`, dev-only) |
-| **Observability** | OpenTelemetry GenAI spans; Langfuse optional |
+| **Observability** | OpenTelemetry GenAI spans; Langfuse optional; Grafana/ClickHouse cost projection |
 
 ## Quick Start
 
@@ -98,7 +100,7 @@ docker-compose up -d postgres qdrant neo4j kafka redis minio minio-init
 cd backend
 pip install -r requirements.txt
 prisma generate
-prisma db push
+prisma migrate deploy
 
 # Seed the dev tenant + admin user (required: auth fails closed without it)
 python scripts/seed_dev.py
@@ -135,19 +137,9 @@ docker-compose up -d
 | **Qdrant Dashboard** | http://localhost:6333/dashboard |
 | **Kafka UI** | http://localhost:8080 |
 
-Langfuse, Grafana and the LiteLLM proxy are optional integrations, not part
-of the default dev compose.
-
----------|-----|
-| **Frontend Dashboard** | http://localhost:3000 |
-| **API Docs (Swagger)** | http://localhost:8000/docs |
-| **LLM Gateway** | http://localhost:4000 |
-| **Kafka UI** | http://localhost:8080 |
-| **MinIO Console** | http://localhost:9001 |
-| **Neo4j Browser** | http://localhost:7474 |
-| **Qdrant Dashboard** | http://localhost:6333/dashboard |
-| **Langfuse** | http://localhost:3000 |
-| **Grafana** | http://localhost:3001 |
+The production compose profile additionally provisions Grafana and
+ClickHouse. It does not create AWS KMS keys, regional databases, OAuth
+applications, or external billing connections.
 
 ---
 
@@ -194,6 +186,19 @@ compatibility modules while new code uses `app.ai`.
 
 ## Key Features (as built)
 
+### 0. Ambient ingestion and enterprise distribution
+- Google Calendar and Microsoft Graph OAuth with signed state, encrypted
+  token references, refresh handling, delta cursors, and reauthorization
+- Recall/Fireflies capture callbacks with per-capture HMAC verification
+- Signed meeting-bot audio ingress into bounded Deepgram streaming relays
+- Versioned `live_transcript` WebSocket events consumed by the dashboard
+- Transactional task outbox with leases, retries, dead letters, and audit trail
+- Jira, Asana, and Linear remote reconciliation with external status as source
+  of truth
+- Slack and Teams installation OAuth boundaries with tenant/workspace identity
+- Redis-backed LLM budgets, durable usage ledger, ClickHouse projection, and
+  Grafana datasource
+
 ### 1. Extraction pipeline
 - Deepgram Nova-2 ASR with diarization → **Presidio PII redaction before storage and LLM**
 - LangGraph: chunking → extraction (JSON-repair retry loop) → deduplication →
@@ -217,10 +222,12 @@ compatibility modules while new code uses `app.ai`.
 - Celery is the single orchestrator; Kafka bus is publish-only for notifications
 
 ### 5. Honest compliance surfaces
-- GDPR: real DSR + export records, cascade erase, portability
-- EU AI Act Art. 11 model cards from versioned config; status endpoints report
-  implemented controls vs. open gaps — certifications reported as not held
-- Metrics are live DB aggregates only
+- GDPR and AI governance endpoints expose implemented controls and open gaps
+- PII/PHI redaction fails closed when the redaction service is unavailable
+- Tenant consent, retention, region, and KMS policy fields are enforced at
+  code boundaries where supported
+- SOC 2, HIPAA/BAA, residency, and formal GDPR certification are not claimed;
+  see [docs/COMPLIANCE.md](docs/COMPLIANCE.md)
 
 ## API Endpoints (v1)
 
@@ -259,6 +266,25 @@ compatibility modules while new code uses `app.ai`.
 | `GET` | `/api/v1/compliance/gdpr` | GDPR compliance status |
 | `GET` | `/api/v1/compliance/model-cards` | Model cards (EU AI Act Art. 11) |
 
+### Ambient capture, calendar, and live transcript
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/meetings/{id}/capture` | Register a provider capture |
+| `POST` | `/api/v1/capture-webhooks/{provider}` | Receive signed bot lifecycle callback |
+| `POST` | `/api/v1/capture-webhooks/{provider}/audio` | Relay signed bot audio to Deepgram |
+| `GET` | `/api/v1/calendar/oauth/{provider}/authorize` | Start Google/Microsoft OAuth |
+| `GET` | `/api/v1/calendar/oauth/callback` | Complete calendar OAuth |
+| `POST` | `/api/v1/calendar/connections/{id}/sync` | Run delta calendar sync |
+| `POST` | `/api/v1/live-transcripts/sessions/{meeting_id}` | Reserve live transcript session |
+| `WS` | `/api/v1/live-transcripts/ws/{meeting_id}` | Authenticated audio/events channel |
+
+### Provider installation and operations
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/integrations/oauth/{provider}/authorize` | Start Slack/Teams installation |
+| `GET` | `/api/v1/integrations/oauth/{provider}/callback` | Complete provider installation |
+| `GET` | `/api/v1/admin/tenant/usage` | Tenant LLM usage and cost |
+
 ### Admin (New)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -289,9 +315,16 @@ compatibility modules while new code uses `app.ai`.
 ### Optional (Production)
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `VAULT_ADDR` | HashiCorp Vault address *(code stub exists; not wired)* | — |
-| `VAULT_TOKEN` | Vault authentication token *(code stub exists; not wired)* | — |
-| `AWS_REGION` | AWS region for Secrets Manager | `us-east-1` |
+| `CALENDAR_OAUTH_STATE_SECRET` | Signed Google/Microsoft OAuth state secret | — |
+| `CALENDAR_TOKEN_ENCRYPTION_KEY` | Fernet-compatible calendar token encryption key | — |
+| `GOOGLE_OAUTH_CLIENT_ID/SECRET` | Google Calendar OAuth application | — |
+| `MICROSOFT_OAUTH_CLIENT_ID/SECRET` | Microsoft Graph OAuth application | — |
+| `SLACK_CLIENT_ID/SECRET` | Slack installation OAuth application | — |
+| `TEAMS_CLIENT_ID/SECRET` | Teams installation OAuth application | — |
+| `AWS_REGION` | AWS region used by KMS clients | `us-east-1` |
+| `KMS_REQUIRED_FOR_TENANT_DATA` | Fail closed when a tenant has no CMK | `false` |
+| `CLICKHOUSE_URL` | ClickHouse HTTP endpoint for usage projection | — |
+| `LLM_GATEWAY_URL` | LiteLLM proxy; required in production-like environments | — |
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key | — |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key | — |
 | `LANGFUSE_HOST` | Langfuse host | `http://langfuse:3000` |
@@ -302,6 +335,10 @@ compatibility modules while new code uses `app.ai`.
 
 See [`.env.example`](.env.example) for complete list.
 
+Never commit `.env`, OAuth client secrets, provider tokens, KMS credentials,
+or generated local secret-store material. The repository intentionally keeps
+only non-secret examples.
+
 ---
 
 ## Development
@@ -310,6 +347,25 @@ See [`.env.example`](.env.example) for complete list.
 ```bash
 cd backend
 pytest tests/ -v --cov=app --cov-report=term-missing
+```
+
+For the same service-backed path used by CI, provide Postgres and Redis and
+run:
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ci \
+REDIS_URL=redis://localhost:6379/0 \
+pytest tests/ -q --ignore=tests/test_rls.py
+```
+
+Frontend checks:
+
+```bash
+cd frontend
+npx tsc --noEmit
+npm run build
+npx playwright install chromium
+npm run e2e
 ```
 
 ### End-to-End Testing
@@ -323,7 +379,13 @@ This script uploads a dummy meeting, triggers processing, polls the API for stat
 ### Database Migrations
 ```bash
 cd backend
-prisma migrate dev --name migration_name
+prisma migrate deploy
+# Development-only schema changes:
+prisma migrate dev --name descriptive_change
+# Validate migration drift against a shadow database:
+prisma migrate diff --from-migrations prisma/migrations \
+  --to-schema-datamodel prisma/schema.prisma \
+  --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
 ```
 
 ### Adding a New Integration
@@ -353,21 +415,23 @@ make security-scan
 > but deployment automation is not built yet.
 
 What exists today:
-- `docker-compose.prod.yml` — a starting point; several monitoring services
-  reference config files that still need to be authored
-  (`infrastructure/{otel,prometheus,grafana,nginx}`).
+- `docker-compose.prod.yml` with Postgres, Redis, MinIO, ClickHouse, Grafana,
+  observability, worker, and gateway service definitions.
 - RLS policies ready to apply (`infrastructure/docker/rls-setup.sql`).
-- Production config guard: the API refuses to boot with default secrets
-  (`settings.validate_security_settings()`).
+- Production config guards for default secrets, LLM gateway enforcement, and
+  fail-closed budget/checkpointer behavior.
+- CI release gates for Prisma validation/migrations, Postgres/Redis-backed
+  tests, strict lint/security checks, frontend build, and Playwright smoke E2E.
 
-What does NOT exist yet (do not assume otherwise):
+What still requires platform provisioning:
 - Kubernetes manifests / Helm charts / Terraform
-- Staging & production CI/CD pipelines (deploy workflows were removed until
-  real targets exist)
-- Managed-service provisioning docs
+- Regional AWS/Cloudflare routing, KMS grants, and managed-service topology
+- Staging/production deployment workflows and rollback automation
+- Provider OAuth applications, vendor webhooks, billing/MRR source, and
+  independent compliance evidence
 
 Minimum viable production path:
-1. Managed Postgres (apply `prisma db push`, then `rls-setup.sql`; connect as
+1. Managed Postgres (run `prisma migrate deploy`, then `rls-setup.sql`; connect as
    restricted `praxisflow_app` role)
 2. Set strong `JWT_SECRET` + configure Clerk keys (local auth auto-disables)
 3. `CHECKPOINTER_BACKEND=postgres`, Redis for budgets/WS relay

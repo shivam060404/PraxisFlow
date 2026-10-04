@@ -5,6 +5,7 @@ Asana Integration Adapter for PraxisFlow.
 import hmac
 import hashlib
 import logging
+import httpx
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -24,7 +25,7 @@ class AsanaAdapter(IntegrationPort):
 
     def _get_headers(self, config: IntegrationConfig) -> Dict[str, str]:
         return {
-            "Authorization": f"Bearer {config.config.get('access_token')}",
+            "Authorization": "Bearer " + str(config.config.get("access_token", "")),
             "Accept": "application/json",
         }
 
@@ -90,6 +91,18 @@ class AsanaAdapter(IntegrationPort):
         )
         logger.info(f"Deleted Asana task {external_id}")
 
+    async def reconcile_task(self, config: IntegrationConfig, task: Task) -> Optional[Dict[str, Any]]:
+        if not task.external_id:
+            return None
+        try:
+            response = await self._make_request(method="GET", url=f"{self.BASE_URL}/tasks/{task.external_id}", headers=self._get_headers(config), params={"opt_fields": "gid,name,completed,permalink_url"})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return {"missing": True, "external_id": task.external_id}
+            raise
+        data = response.json().get("data", {})
+        return {"external_id": data.get("gid", task.external_id), "external_url": data.get("permalink_url") or f"https://app.asana.com/0/{task.external_id}", "status": "done" if data.get("completed") else "todo"}
+
     def normalize_webhook(self, payload: Dict[str, Any]) -> NormalizedWebhookEvent:
         """Convert Asana webhook to normalized event."""
         events = payload.get("events", [])
@@ -97,12 +110,7 @@ class AsanaAdapter(IntegrationPort):
         resource = event.get("resource", {})
 
         completed = resource.get("completed")
-        if completed is True:
-            status = "done"
-        elif completed is False:
-            status = "todo"
-        else:
-            status = "unknown"
+        status = self.normalize_status("done" if completed is True else "todo" if completed is False else "")
 
         return NormalizedWebhookEvent(
             external_id=resource.get("gid"),

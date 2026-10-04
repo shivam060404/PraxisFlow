@@ -2,13 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import List, Optional
 import asyncio
 from datetime import datetime, timedelta
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import UUID
 
 from app.core.config import settings
 from app.db.prisma import get_prisma
 from app.security import require_permission, Role, Permission
 from app.schemas import UserCreate, UserUpdate, UserResponse, to_prisma_data
+from app.services.kms import validate_tenant_key_region
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -20,6 +21,12 @@ class TenantSettingsUpdate(BaseModel):
     plan: Optional[str] = None
     status: Optional[str] = None
     settings: Optional[dict] = None
+    data_region: Optional[str] = Field(default=None, pattern="^[a-z]{2}(-[a-z0-9-]+)?$")
+    kms_key_arn: Optional[str] = None
+    retention_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    recording_consent_required: Optional[bool] = None
+    phi_processing_enabled: Optional[bool] = None
+    monthly_llm_budget_usd: Optional[float] = Field(default=None, ge=0, le=10_000_000)
 
 
 class IntegrationConfigUpdate(BaseModel):
@@ -62,6 +69,14 @@ async def update_tenant(
 ):
     """Update tenant configuration."""
     db = await get_prisma()
+    current_tenant = await db.tenant.find_unique(where={"id": current_user.tenant_id})
+    if not current_tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if settings.kms_key_arn:
+        validate_tenant_key_region(
+            settings.kms_key_arn,
+            settings.data_region or current_tenant.dataRegion,
+        )
     tenant = await db.tenant.update(
         where={"id": current_user.tenant_id},
         data=to_prisma_data(settings),
@@ -104,6 +119,22 @@ async def get_tenant_usage(
             "completionTokens": True,
         }
     )
+    llm_cost = await db.llmusagerecord.aggregate(
+        where={
+            "tenantId": tenant_id,
+            "createdAt": {"gte": start_of_month},
+        },
+        _sum={
+            "promptTokens": True,
+            "completionTokens": True,
+            "totalTokens": True,
+            "costUsd": True,
+        },
+    )
+    tenant = await db.tenant.find_unique(
+        where={"id": tenant_id},
+        select={"monthlyLlmBudgetUsd": True},
+    )
     
     return {
         "meetings": meetings_count,
@@ -116,6 +147,17 @@ async def get_tenant_usage(
             "completion": total_tokens._sum.completionTokens or 0,
         },
         "period_start": start_of_month.isoformat(),
+        "llm_spend": {
+            "cost_usd": llm_cost._sum.costUsd or 0,
+            "prompt_tokens": llm_cost._sum.promptTokens or 0,
+            "completion_tokens": llm_cost._sum.completionTokens or 0,
+            "total_tokens": llm_cost._sum.totalTokens or 0,
+            "monthly_budget_usd": (
+                tenant.monthlyLlmBudgetUsd
+                if tenant
+                else settings.LLM_MONTHLY_BUDGET_DEFAULT_USD
+            ),
+        },
     }
 
 
@@ -388,6 +430,55 @@ async def trigger_sync(
     return {"message": "Sync triggered", "integration_id": str(integration_id)}
 
 
+@router.get("/webhook-events/dead-letter", summary="List failed webhook events")
+async def list_dead_letter_webhooks(
+    current_user=Depends(require_permission(Permission.INTEGRATION_SYNC)),
+):
+    """Return tenant-scoped webhook failures requiring operator action."""
+    db = await get_prisma()
+    return await db.integrationwebhookevent.find_many(
+        where={"tenantId": current_user.tenant_id, "status": "DEAD_LETTER"},
+        order={"createdAt": "desc"},
+        take=100,
+    )
+
+
+@router.post(
+    "/webhook-events/{event_id}/replay",
+    summary="Replay a failed webhook event",
+)
+async def replay_webhook(
+    event_id: UUID,
+    current_user=Depends(require_permission(Permission.INTEGRATION_SYNC)),
+):
+    """Requeue one tenant-owned dead-letter event for controlled replay."""
+    db = await get_prisma()
+    event = await db.integrationwebhookevent.find_first(
+        where={
+            "id": str(event_id),
+            "tenantId": current_user.tenant_id,
+            "status": "DEAD_LETTER",
+        }
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail="Dead-letter webhook event not found")
+
+    await db.integrationwebhookevent.update(
+        where={"id": event.id},
+        data={
+            "status": "PENDING",
+            "attempts": 0,
+            "availableAt": datetime.utcnow(),
+            "lockedAt": None,
+            "lastError": None,
+        },
+    )
+    from app.workers.tasks import process_webhook_event
+
+    process_webhook_event.delay(event.id)
+    return {"status": "queued", "event_id": event.id}
+
+
 # ─── Audit & Compliance ───
 
 @router.get("/audit-logs", summary="Get audit logs")
@@ -635,5 +726,3 @@ async def get_system_metrics(
         "celery_workers_online": len(celery_workers),
         "celery_worker_names": celery_workers,
     }
-
-
