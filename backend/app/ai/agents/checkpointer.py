@@ -7,8 +7,9 @@ Backends:
     processes. Requires DATABASE_URL.
   - "memory": in-process MemorySaver (single-instance dev only).
 
-The backend is selected with CHECKPOINTER_BACKEND (default: postgres, with
-automatic fallback to memory if Postgres setup fails — logged loudly).
+The backend is selected with CHECKPOINTER_BACKEND (default: postgres).
+Production refuses startup if the persistent backend is unavailable; memory
+is permitted only when explicitly selected in development.
 """
 
 import logging
@@ -25,12 +26,13 @@ _pool = None
 def get_shared_checkpointer():
     """Return the initialized checkpointer.
 
-    Falls back to a fresh MemorySaver when init hasn't run yet (import-time
-    graph building in tests) so callers never crash — but production paths
-    must call init_checkpointer() during startup.
+    A development process may use an in-memory saver when startup has not
+    initialized one. Production callers fail until init_checkpointer succeeds.
     """
     global _checkpointer
     if _checkpointer is None:
+        if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+            raise RuntimeError("Production graph requested before persistent checkpointer initialization")
         from langgraph.checkpoint.memory import MemorySaver
 
         _checkpointer = MemorySaver()
@@ -61,6 +63,7 @@ async def init_checkpointer() -> None:
                 min_size=1,
                 max_size=5,
                 open=False,
+                kwargs={"options": "-c search_path=langgraph"},
             )
             await _pool.open()
 
@@ -71,12 +74,19 @@ async def init_checkpointer() -> None:
             logger.info("LangGraph checkpointer: postgres backend ready")
             return
         except Exception as e:
-            logger.error(
-                f"Postgres checkpointer init failed ({e}); "
-                "falling back to in-memory MemorySaver"
-            )
+            _pool = None
+            _checkpointer = None
+            if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                raise RuntimeError(f"Persistent Postgres checkpointer initialization failed: {e}") from e
+            logger.error("Postgres checkpointer init failed (%s); using in-memory saver in development", e)
+            backend = "memory"
 
-    # memory backend or fallback
+    if backend != "memory":
+        raise ValueError(f"Unsupported CHECKPOINTER_BACKEND: {backend}")
+    if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+        raise RuntimeError("In-memory LangGraph checkpoints are forbidden in production")
+
+    # Explicit development-only memory backend.
     from langgraph.checkpoint.memory import MemorySaver
 
     _checkpointer = MemorySaver()

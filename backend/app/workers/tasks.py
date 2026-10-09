@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.db.prisma import get_prisma
+from app.core.config import settings
 from app.services.asr import transcribe_meeting
 from app.services.storage import storage_service
 from app.workers.celery_app import celery_app, async_task
@@ -27,16 +28,26 @@ def run_async(coro):
         
     return loop.run_until_complete(coro)
 
+
+async def _run_in_tenant(coro, tenant_id: str):
+    """Bind a queued job to its authenticated tenant for all DB operations."""
+    from app.db.prisma import set_request_tenant, reset_request_tenant
+    token = set_request_tenant(tenant_id)
+    try:
+        return await coro
+    finally:
+        reset_request_tenant(token)
+
 logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def process_meeting(self, meeting_id: str):
+def process_meeting(self, meeting_id: str, tenant_id: str):
     """Process a meeting: transcribe -> extract -> verify -> resolve."""
     logger.info(f"Starting meeting processing: {meeting_id}")
     
     try:
-        result = run_async(_process_meeting_async(meeting_id))
+        result = run_async(_run_in_tenant(_process_meeting_async(meeting_id, tenant_id), tenant_id))
         logger.info(f"Meeting processing completed: {meeting_id}")
         return result
     except Exception as e:
@@ -46,17 +57,17 @@ def process_meeting(self, meeting_id: str):
             self.retry(exc=e)
         except MaxRetriesExceededError:
             # Mark meeting as error
-            run_async(_mark_meeting_error(meeting_id, str(e)))
+            run_async(_run_in_tenant(_mark_meeting_error(meeting_id, str(e)), tenant_id))
             raise
 
 
-async def _process_meeting_async(meeting_id: str):
+async def _process_meeting_async(meeting_id: str, tenant_id: str):
     """Async meeting processing pipeline."""
     db = await get_prisma()
     
     # Get meeting
     meeting = await db.meeting.find_unique(where={"id": meeting_id})
-    if not meeting:
+    if not meeting or meeting.tenantId != tenant_id:
         raise ValueError(f"Meeting not found: {meeting_id}")
     
     # Update status
@@ -84,7 +95,7 @@ async def _process_meeting_async(meeting_id: str):
             logger.info(f"Transcript already exists for meeting {meeting_id}, skipping transcription")
     
     # Step 2: Run extraction pipeline
-    run_extraction.delay(meeting_id)
+    run_extraction.delay(meeting_id, tenant_id)
     
     return {"status": "transcribed", "meeting_id": meeting_id}
 
@@ -111,12 +122,12 @@ async def _mark_meeting_error(meeting_id: str, error: str):
 
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=120)
-def run_extraction(self, meeting_id: str):
+def run_extraction(self, meeting_id: str, tenant_id: str):
     """Run the LangGraph extraction pipeline."""
     logger.info(f"Running extraction for meeting: {meeting_id}")
     
     try:
-        result = run_async(_run_extraction_async(meeting_id))
+        result = run_async(_run_in_tenant(_run_extraction_async(meeting_id, tenant_id), tenant_id))
         logger.info(f"Extraction completed: {meeting_id}")
         return result
     except Exception as e:
@@ -125,11 +136,11 @@ def run_extraction(self, meeting_id: str):
         try:
             self.retry(exc=e)
         except MaxRetriesExceededError:
-            run_async(_mark_extraction_failed(meeting_id, str(e)))
+            run_async(_run_in_tenant(_mark_extraction_failed(meeting_id, str(e)), tenant_id))
             raise
 
 
-async def _run_extraction_async(meeting_id: str):
+async def _run_extraction_async(meeting_id: str, tenant_id: str):
     """Async extraction pipeline using LangGraph."""
     db = await get_prisma()
     
@@ -141,8 +152,21 @@ async def _run_extraction_async(meeting_id: str):
     
     if not meeting or not meeting.transcript:
         raise ValueError("Meeting or transcript not found")
+    if meeting.tenantId != tenant_id:
+        raise ValueError("Meeting tenant does not match queued job tenant")
     
     transcript = meeting.transcript
+
+    if settings.RAG_ENABLED:
+        from app.ai.rag import RAGService
+        from app.clients.llm_gateway.client import get_gateway_client
+        # Index the persisted, PII-redacted transcript before retrieval can be
+        # used for grounding. Stable chunk IDs make worker retries idempotent.
+        await RAGService(await get_gateway_client()).index_transcript(
+            transcript=transcript.fullText,
+            tenant_id=tenant_id,
+            meeting_id=meeting_id,
+        )
     
     # Update status to PROCESSING
     await db.meeting.update(
@@ -198,7 +222,7 @@ async def _run_extraction_async(meeting_id: str):
         where={"meetingId": meeting_id, "verificationStatus": "NEEDS_REVIEW"},
     )
     for task in tasks:
-        verify_task.delay(task.id)
+        verify_task.delay(task.id, tenant_id)
     
     task_count = len(final_state.get("final_tasks", [])) if final_state.get("final_tasks") else 0
     logger.info(f"Extraction pipeline created {task_count} tasks for meeting {meeting_id}")
@@ -226,6 +250,7 @@ async def _run_extraction_async(meeting_id: str):
 async def _mark_extraction_failed(meeting_id: str, error: str):
     """Mark extraction as failed."""
     db = await get_prisma()
+    await db.meeting.update(where={"id": meeting_id}, data={"status": "ERROR"})
     await db.meetingflag.create(
         data={
             "meetingId": meeting_id,
@@ -236,12 +261,12 @@ async def _mark_extraction_failed(meeting_id: str, error: str):
 
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=60)
-def verify_task(self, task_id: str):
+def verify_task(self, task_id: str, tenant_id: str):
     """Run verification agent on a task."""
     logger.info(f"Verifying task: {task_id}")
     
     try:
-        result = run_async(_verify_task_async(task_id))
+        result = run_async(_run_in_tenant(_verify_task_async(task_id, tenant_id), tenant_id))
         logger.info(f"Verification completed: {task_id}")
         return result
     except Exception as e:
@@ -250,11 +275,11 @@ def verify_task(self, task_id: str):
         try:
             self.retry(exc=e)
         except MaxRetriesExceededError:
-            run_async(_mark_verification_failed(task_id, str(e)))
+            run_async(_run_in_tenant(_mark_verification_failed(task_id, str(e)), tenant_id))
             raise
 
 
-async def _verify_task_async(task_id: str):
+async def _verify_task_async(task_id: str, tenant_id: str):
     """Ground the extracted task against its meeting transcript.
 
     Uses the guardrails HallucinationDetector (keyword-overlap faithfulness
@@ -270,6 +295,8 @@ async def _verify_task_async(task_id: str):
 
     if not task:
         raise ValueError(f"Task not found: {task_id}")
+    if task.tenantId != tenant_id:
+        raise ValueError("Task tenant does not match queued job tenant")
 
     transcript = (
         task.meeting.transcript.fullText
@@ -339,7 +366,7 @@ async def _verify_task_async(task_id: str):
 
     # Only resolve assignees for verified tasks
     if verification_status == "VERIFIED":
-        resolve_assignee.delay(task_id)
+        resolve_assignee.delay(task_id, tenant_id)
     
     return {"verified": True, "task_id": task_id}
 
@@ -358,12 +385,12 @@ async def _mark_verification_failed(task_id: str, error: str):
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def resolve_assignee(self, task_id: str):
+def resolve_assignee(self, task_id: str, tenant_id: str):
     """Resolve assignee hint to actual user."""
     logger.info(f"Resolving assignee for task: {task_id}")
     
     try:
-        result = asyncio.run(_resolve_assignee_async(task_id))
+        result = run_async(_run_in_tenant(_resolve_assignee_async(task_id, tenant_id), tenant_id))
         logger.info(f"Assignee resolution completed: {task_id}")
         return result
     except Exception as e:
@@ -372,11 +399,11 @@ def resolve_assignee(self, task_id: str):
         try:
             self.retry(exc=e)
         except MaxRetriesExceededError:
-            asyncio.run(_mark_resolution_failed(task_id, str(e)))
+            run_async(_run_in_tenant(_mark_resolution_failed(task_id, str(e)), tenant_id))
             raise
 
 
-async def _resolve_assignee_async(task_id: str):
+async def _resolve_assignee_async(task_id: str, tenant_id: str):
     """Async assignee resolution."""
     db = await get_prisma()
     
@@ -387,6 +414,8 @@ async def _resolve_assignee_async(task_id: str):
     
     if not task or not task.assigneeHint:
         return {"resolved": False, "reason": "No assignee hint"}
+    if task.tenantId != tenant_id:
+        raise ValueError("Task tenant does not match queued job tenant")
     
     # Simple fuzzy match against attendees
     from rapidfuzz import fuzz
@@ -429,7 +458,7 @@ async def _resolve_assignee_async(task_id: str):
         )
         
         # Trigger sync to integrations
-        sync_task_to_integrations.delay(task_id)
+        sync_task_to_integrations.delay(task_id, tenant_id)
         
         return {"resolved": True, "assignee_id": best_match.userId}
     
@@ -449,12 +478,12 @@ async def _mark_resolution_failed(task_id: str, error: str):
 
 
 @shared_task(bind=True, max_retries=5, default_retry_delay=300)
-def sync_task_to_integrations(self, task_id: str):
+def sync_task_to_integrations(self, task_id: str, tenant_id: str):
     """Sync verified task to external integrations."""
     logger.info(f"Syncing task to integrations: {task_id}")
     
     try:
-        result = asyncio.run(_sync_task_async(task_id))
+        result = run_async(_run_in_tenant(_sync_task_async(task_id, tenant_id=tenant_id), tenant_id))
         logger.info(f"Sync completed: {task_id}")
         return result
     except Exception as e:
@@ -463,11 +492,11 @@ def sync_task_to_integrations(self, task_id: str):
         try:
             self.retry(exc=e)
         except MaxRetriesExceededError:
-            asyncio.run(_mark_sync_failed(task_id, str(e)))
+            run_async(_run_in_tenant(_mark_sync_failed(task_id, str(e)), tenant_id))
             raise
 
 
-async def _sync_task_async(task_id: str, integration_id: str = None):
+async def _sync_task_async(task_id: str, integration_id: str = None, tenant_id: str = None):
     """Async integration sync using adapter pattern."""
     db = await get_prisma()
     
@@ -478,6 +507,9 @@ async def _sync_task_async(task_id: str, integration_id: str = None):
     
     if not task:
         raise ValueError(f"Task not found: {task_id}")
+    if tenant_id and task.tenantId != tenant_id:
+        raise ValueError("Task tenant does not match queued job tenant")
+    tenant_id = tenant_id or task.tenantId
     
     # Get active integrations for tenant (optionally scoped to one)
     integration_where = {
@@ -565,9 +597,9 @@ async def _mark_sync_failed(task_id: str, error: str):
 
 
 @shared_task
-def retry_failed_sync(task_id: str, integration_id: str = None):
+def retry_failed_sync(task_id: str, tenant_id: str, integration_id: str = None):
     """Retry a failed sync, optionally scoped to one integration."""
-    return asyncio.run(_sync_task_async(task_id, integration_id))
+    return run_async(_run_in_tenant(_sync_task_async(task_id, integration_id, tenant_id), tenant_id))
 
 
 @shared_task

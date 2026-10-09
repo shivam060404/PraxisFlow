@@ -41,13 +41,13 @@ An enterprise-grade agentic AI platform that transforms passive meeting recordin
 │  (pre-storage/pre-LLM) │            │ budgets(Redis) · circuit brkr  │
 └────────────────────────┘            └────────────────────────────────┘
 
-DATA: PostgreSQL16+pgvector (Prisma, RLS-ready) · Qdrant · Neo4j · Redis · MinIO
+DATA: PostgreSQL16+pgvector (Prisma, runtime RLS) · Qdrant · Neo4j · Redis · MinIO
 OBSERVABILITY: OpenTelemetry GenAI spans · Langfuse (optional)
 CHECKPOINTS: Postgres-backed LangGraph saver (HITL survives restarts)
 ```
 
-**Deliberately absent:** Kong/NGINX edge, Elasticsearch, ClickHouse, Jaeger,
-Sentry, PagerDuty, Helm charts. These are roadmap items, not implemented —
+**Deliberately absent:** Elasticsearch, ClickHouse, Jaeger, Sentry, PagerDuty,
+Helm charts. These are roadmap items, not implemented —
 the previous README listed them as if they existed.
 
 ---
@@ -57,9 +57,9 @@ the previous README listed them as if they existed.
 | Layer | Technology |
 |-------|-----------|
 | **ASR** | Deepgram Nova-2 (diarization, word-level timestamps) |
-| **LLM** | Groq Llama-3.3-70B primary · GPT-4o fallback (LiteLLM client; optional LiteLLM proxy via `LLM_GATEWAY_URL`) |
+| **LLM** | Groq Llama-3.3-70B primary · GPT-4o/Claude fallbacks; production routes through the configured LiteLLM gateway |
 | **Pipeline** | LangGraph 0.2 — chunking → extraction → dedup → grounded verification → entity resolution → persistence |
-| **Verification** | Guardrails engine: faithfulness scoring, hallucination detection, contradiction & deadline-conflict detection, HITL routing |
+| **Verification** | Faithfulness and hallucination checks; uncertain extracted tasks enter persisted human review. Guardrail handoff actions fail closed and do not enter that review queue. |
 | **PII redaction** | Microsoft Presidio (applied before storage and before any LLM call) |
 | **Entity resolution** | Neo4j graph traversal + rapidfuzz fuzzy matching |
 | **Database** | PostgreSQL 16 + pgvector via Prisma; RLS policies provided (`infrastructure/docker/rls-setup.sql`) |
@@ -276,17 +276,28 @@ compatibility modules while new code uses `app.ai`.
 
 ## Configuration
 
-### Required Environment Variables
+### Local development environment variables
 | Variable | Description |
 |----------|-------------|
 | `DEEPGRAM_API_KEY` | Deepgram Nova-2 ASR |
 | `GROQ_API_KEY` | Groq (primary LLM) |
 | `OPENAI_API_KEY` | OpenAI (fallback + embeddings) |
 | `ANTHROPIC_API_KEY` | Anthropic (fallback) |
-| `DATABASE_URL` | PostgreSQL connection string |
+| `DATABASE_URL` | Local development PostgreSQL connection string |
 | `REDIS_URL` | Redis for Celery + cache |
 
-### Optional (Production)
+### Production Compose requirements
+
+Production uses `APP_DATABASE_URL` (restricted RLS role),
+`WEBHOOK_LOOKUP_DATABASE_URL`, `BACKUP_DATABASE_URL`, and an off-host S3
+destination (`BACKUP_S3_*`). It also requires Clerk issuer/JWKS settings, a
+gateway master key and all configured provider keys, separate MinIO service
+credentials, a dedicated Langfuse database, and TLS certificate files for
+Nginx. See `.env.example` and [production operations](docs/PRODUCTION_OPERATIONS.md)
+for the complete setup and recovery procedure. Inject real secrets through a
+deployment secret manager; do not commit populated environment files.
+
+### Optional integrations
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `VAULT_ADDR` | HashiCorp Vault address *(code stub exists; not wired)* | — |
@@ -348,17 +359,20 @@ make security-scan
 
 ## Production Deployment
 
-> **Honest status:** the application layer is production-shaped (real auth,
-> tenant scoping, persistent checkpoints, Redis-backed budgets/WS fanout),
-> but deployment automation is not built yet.
+> **Honest status:** production settings now fail closed for the model gateway,
+> Postgres checkpoints, PII redaction, Clerk auth, and tenant RLS. The Compose
+> file is a single-host deployment template, not a high-availability platform
+> or a substitute for managed-service recovery testing.
 
 What exists today:
-- `docker-compose.prod.yml` — a starting point; several monitoring services
-  reference config files that still need to be authored
-  (`infrastructure/{otel,prometheus,grafana,nginx}`).
-- RLS policies ready to apply (`infrastructure/docker/rls-setup.sql`).
-- Production config guard: the API refuses to boot with default secrets
-  (`settings.validate_security_settings()`).
+- `docker-compose.prod.yml` — single-host reference deployment. Internal data
+  services are not published on host interfaces; monitoring ports bind to
+  loopback and application ingress goes through NGINX.
+- `infrastructure/docker/rls-setup.sql` — apply only after the Prisma schema
+  exists. Runtime queries use a tenant-bound transaction proxy and the
+  restricted `praxisflow_app` database role.
+- Production config guard rejects local auth, missing PII redaction, missing
+  gateway credentials, in-memory checkpoints, and non-RLS database roles.
 
 What does NOT exist yet (do not assume otherwise):
 - Kubernetes manifests / Helm charts / Terraform
@@ -367,11 +381,27 @@ What does NOT exist yet (do not assume otherwise):
 - Managed-service provisioning docs
 
 Minimum viable production path:
-1. Managed Postgres (apply `prisma db push`, then `rls-setup.sql`; connect as
-   restricted `praxisflow_app` role)
-2. Set strong `JWT_SECRET` + configure Clerk keys (local auth auto-disables)
-3. `CHECKPOINTER_BACKEND=postgres`, Redis for budgets/WS relay
-4. Run API + Celery workers behind TLS-terminating proxy of your choice
+1. Provision the database schema, then apply `infrastructure/docker/rls-setup.sql`
+   as an administrator. Set passwords for `praxisflow_app`, the
+   column-restricted `praxisflow_webhook_lookup`, and read-only
+   `praxisflow_backup`; use those roles in `APP_DATABASE_URL`,
+   `WEBHOOK_LOOKUP_DATABASE_URL`, and `BACKUP_DATABASE_URL` respectively.
+2. Provision a dedicated Langfuse database and configure its restricted
+   `LANGFUSE_DATABASE_URL`. Configure Clerk issuer/JWKS, provider keys, a unique `LITELLM_MASTER_KEY`,
+   Deepgram, Redis, object storage, and the remaining required secrets.
+3. Start from `docker-compose.prod.yml`; the API and workers refuse production
+   startup if the protected runtime dependencies are unavailable.
+4. Before serving real traffic, run the live AI evaluation and validate backup
+   restore, database failover, worker restart, and tenant-isolation procedures.
+   Install the Nginx certificate and key files documented in
+   `docs/PRODUCTION_OPERATIONS.md` before starting the production Compose stack.
+
+The Compose stack does not configure PostgreSQL replication. For production
+availability, use a managed HA PostgreSQL deployment and tested backups. The
+committed AI gold set is a regression starter, not a representative quality
+benchmark; expand it with consented, redacted, adjudicated meeting data.
+Recovery expectations and the required restore drill are documented in
+[`docs/PRODUCTION_OPERATIONS.md`](docs/PRODUCTION_OPERATIONS.md).
 
 ## Cost Estimates (1,000 meetings/month — rough vendor list pricing)
 

@@ -1,11 +1,12 @@
 from langgraph.graph import StateGraph, END
-from langgraph.errors import NodeInterrupt
+from langgraph.types import Command, interrupt
 from langchain_core.messages import SystemMessage, HumanMessage
 from typing import List, Optional, Dict, Any
 import json
 import logging
 import asyncio
 import time
+import hashlib
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -185,6 +186,7 @@ async def _retrieve_grounding_context(state: ExtractionState, query: str) -> str
             query=query,
             tenant_id=state.tenant_id,
             user_id=state.user_id,
+            meeting_id=state.meeting_id,
             score_threshold=settings.RAG_SCORE_THRESHOLD,
         )
         return service.format_context(documents, settings.RAG_MAX_CONTEXT_CHARS)
@@ -249,6 +251,7 @@ async def chunking_node(state: ExtractionState) -> ExtractionState:
             logger.error(f"Chunking failed: {e}")
             state.errors.append(f"Chunking failed: {str(e)}")
             genai_tracer.log_pipeline_step("chunking", "failed", error=str(e))
+            raise
         
         return state
 
@@ -324,6 +327,7 @@ Extract tasks, decisions, follow-ups, and blockers from this segment."""},
             logger.error(f"Extraction failed: {e}")
             state.errors.append(f"Extraction failed: {str(e)}")
             genai_tracer.log_pipeline_step("extraction", "failed", error=str(e))
+            raise
         
         return state
 
@@ -586,11 +590,12 @@ Respond with valid JSON only."""
                 # Create HITL payload with all tasks needing review
                 hitl_payloads = []
                 for task, verdict, source_text in hitl_tasks:
+                    task.review_id = task.review_id or str(uuid4())
                     suggested_action = "APPROVE" if (verdict and verdict.verdict == "NEEDS_REVIEW") else "REJECT"
                     hitl_payload = HITLPayload(
                         meeting_id=state.meeting_id,
                         tenant_id=state.tenant_id,
-                        task_id=str(uuid4()),  # Will be replaced with real ID after persistence
+                        task_id=task.review_id,
                         interrupt_reason=task.human_review_reason,
                         task_data=task.model_dump(),
                         confidence_score=task.confidence,
@@ -605,43 +610,8 @@ Respond with valid JSON only."""
                 state.interrupt_reason = f"{len(hitl_tasks)} task(s) require human review"
                 state.interrupt_node = "verification"
                 state.interrupt_payload = {"tasks": hitl_payloads}
-                
-                # For langgraph 0.2.38 compatibility, we raise NodeInterrupt or simulate it
-                # human_feedback = interrupt({"tasks": hitl_payloads})
-                human_feedback = getattr(state, "human_feedback", None)
-                if not human_feedback:
-                    # In a real app, we would raise NodeInterrupt("HITL Required") here
-                    # For this test, we'll auto-approve them if they were NEEDS_REVIEW
-                    human_feedback = {"tasks": []}
-                    for task, verdict, source in hitl_tasks:
-                        if verdict and verdict.verdict == "NEEDS_REVIEW":
-                             human_feedback["tasks"].append({"task_id": task.title, "action": "APPROVE"})
-                        else:
-                             human_feedback["tasks"].append({"task_id": task.title, "action": "REJECT"})
-                
-                # Process human feedback after resume
-                if human_feedback:
-                    state.human_feedback = human_feedback
-                    feedback_by_task = {fb.get("task_id"): fb for fb in human_feedback.get("tasks", [])}
-                    
-                    for task, verdict, source_text in hitl_tasks:
-                        task_feedback = feedback_by_task.get(task.title) or feedback_by_task.get(str(id(task)))
-                        if task_feedback:
-                            action = task_feedback.get("action", "REJECT")
-                            if action == "APPROVE":
-                                task.verification_status = "VERIFIED"
-                                verified_tasks.append(task)
-                            elif action == "MODIFY":
-                                modifications = task_feedback.get("modifications", {})
-                                for key, value in modifications.items():
-                                    if hasattr(task, key):
-                                        setattr(task, key, value)
-                                task.verification_status = "VERIFIED"
-                                verified_tasks.append(task)
-                            # REJECT = don't add to verified_tasks
-                        else:
-                            # No feedback for this task, default to reject
-                            pass
+
+                state.pending_review_tasks = [task for task, _, _ in hitl_tasks]
             
             state.verified_tasks = verified_tasks
             logger.info(f"Verified {len(verified_tasks)} tasks for meeting {state.meeting_id}")
@@ -654,8 +624,79 @@ Respond with valid JSON only."""
             logger.error(f"Verification node failed: {e}")
             state.errors.append(f"Verification failed: {str(e)}")
             genai_tracer.log_pipeline_step("verification", "failed", error=str(e))
-        
+            raise
+
         return state
+
+
+async def human_review_node(state: ExtractionState) -> ExtractionState:
+    """Pause durably for explicit decisions on tasks requiring human review."""
+    if not state.pending_review_tasks:
+        return state
+    if not state.interrupt_payload:
+        raise RuntimeError("Pending review tasks have no review payload")
+
+    db = await get_prisma()
+    for task in state.pending_review_tasks:
+        payload = next(item for item in state.interrupt_payload["tasks"] if item["task_id"] == task.review_id)
+        existing = await db.humanreview.find_first(where={"reviewId": task.review_id})
+        if not existing:
+            await db.humanreview.create(data={
+                "tenantId": state.tenant_id,
+                "meetingId": state.meeting_id,
+                "reviewId": task.review_id,
+                "taskData": task.model_dump(),
+                "transcriptEvidence": payload["transcript_evidence"],
+                "reason": payload["interrupt_reason"],
+                "confidence": task.confidence,
+                "status": "PENDING",
+            })
+
+    feedback = interrupt({"tasks": state.interrupt_payload["tasks"], "meeting_id": state.meeting_id})
+    if not isinstance(feedback, dict):
+        raise ValueError("HITL resume payload must be an object")
+    decisions = {
+        item.get("task_id"): item
+        for item in feedback.get("tasks", [])
+        if isinstance(item, dict)
+    }
+    expected = {task.review_id for task in state.pending_review_tasks}
+    if len(decisions) != len(feedback.get("tasks", [])) or set(decisions) != expected:
+        raise ValueError("HITL feedback must include exactly one decision for every pending task")
+
+    state.human_feedback = feedback
+    for task in state.pending_review_tasks:
+        decision = decisions[task.review_id]
+        action = decision.get("action")
+        review_record = {
+            "review_id": task.review_id,
+            "action": action,
+            "reviewer_id": feedback.get("reviewer_id", "unknown"),
+            "comment": feedback.get("comment"),
+            "modifications": decision.get("modifications"),
+            "task_data": task.model_dump(),
+        }
+        if action == "APPROVE":
+            task.verification_status = "VERIFIED"
+            state.verified_tasks.append(task)
+        elif action == "MODIFY":
+            changes = decision.get("modifications") or {}
+            allowed = {"title", "description", "assignee_hint", "deadline_hint", "priority_hint"}
+            if not changes or set(changes) - allowed:
+                raise ValueError("HITL modifications contain unsupported fields")
+            modified = ExtractedTask.model_validate({**task.model_dump(), **changes})
+            modified.verification_status = "VERIFIED"
+            state.verified_tasks.append(modified)
+            review_record["task_data"] = modified.model_dump()
+        elif action != "REJECT":
+            raise ValueError(f"Unsupported HITL action: {action}")
+        state.human_review_records.append(review_record)
+
+    state.pending_review_tasks = []
+    state.interrupted = False
+    state.interrupt_reason = None
+    state.interrupt_node = None
+    return state
 
 
 def _build_hitl_reason(task: ExtractedTask, verdict: VerificationResult) -> str:
@@ -720,8 +761,8 @@ async def entity_resolution_node(state: ExtractionState) -> ExtractionState:
         except Exception as e:
             logger.error(f"Entity resolution failed: {e}")
             state.errors.append(f"Entity resolution failed: {str(e)}")
-            state.final_tasks = state.verified_tasks  # Pass through on error
             genai_tracer.log_pipeline_step("entity_resolution", "failed", error=str(e))
+            raise
         
         return state
 
@@ -739,102 +780,109 @@ async def persistence_node(state: ExtractionState) -> ExtractionState:
     )):
         try:
             genai_tracer.log_pipeline_step("persistence", "started", tasks=len(state.final_tasks))
-            
-            from app.db.prisma import get_prisma
-            from app.schemas import TaskCreate, TaskStatus, VerificationStatus
-            from uuid import UUID
-            
             db = await get_prisma()
-            
-            created_tasks = []
-            
-            for task in state.final_tasks:
-                # Determine initial status based on verification
-                if task.verification_status == "VERIFIED":
-                    initial_status = TaskStatus.VERIFIED
-                elif task.verification_status == "NEEDS_REVIEW":
-                    initial_status = TaskStatus.PENDING_REVIEW
-                else:
-                    initial_status = TaskStatus.EXTRACTED
-                
-                task_create = TaskCreate(
-                    tenant_id=UUID(state.tenant_id),
-                    meeting_id=UUID(state.meeting_id),
-                    title=task.title,
-                    description=task.description,
-                    task_type=task.task_type,
-                    priority=task.priority_hint,
-                    assignee_hint=task.assignee_hint,
-                    deadline_hint=task.deadline_hint,
-                    transcript_word_start=task.transcript_word_start,
-                    transcript_word_end=task.transcript_word_end,
-                    source_quote=task.source_quote,
-                    verification_status=VerificationStatus(task.verification_status),
-                    verification_reasoning=task.verification_reasoning,
-                    extraction_confidence=task.confidence,
+            created_count = 0
+            async with db.tx() as tx:
+                for task in state.final_tasks:
+                    normalized_source = " ".join(task.source_quote.casefold().split())
+                    fingerprint = hashlib.sha256(
+                        f"{task.task_type}\0{' '.join(task.title.casefold().split())}\0{normalized_source}".encode()
+                    ).hexdigest()
+                    existing = await tx.task.find_first(where={
+                        "meetingId": state.meeting_id,
+                        "extractionFingerprint": fingerprint,
+                    })
+                    if existing:
+                        continue
+
+                    initial_status = "VERIFIED" if task.verification_status == "VERIFIED" else (
+                        "PENDING_REVIEW" if task.verification_status == "NEEDS_REVIEW" else "EXTRACTED"
+                    )
+                    data = {
+                        "tenantId": state.tenant_id,
+                        "meetingId": state.meeting_id,
+                        "title": task.title,
+                        "description": task.description,
+                        "taskType": task.task_type,
+                        "status": initial_status,
+                        "priority": task.priority_hint,
+                        "assigneeHint": task.assignee_hint,
+                        "assigneeId": task.assignee_id,
+                        "assigneeResolvedBy": task.assignee_resolved_by,
+                        "deadlineHint": task.deadline_hint,
+                        "transcriptWordStart": task.transcript_word_start,
+                        "transcriptWordEnd": task.transcript_word_end,
+                        "sourceQuote": task.source_quote,
+                        "extractionFingerprint": fingerprint,
+                        "verificationStatus": task.verification_status,
+                        "verificationReasoning": task.verification_reasoning,
+                        "extractionConfidence": task.confidence,
+                    }
+                    created = await tx.task.create(data={key: value for key, value in data.items() if value is not None})
+                    created_count += 1
+
+                    review_record = next((record for record in state.human_review_records
+                        if record.get("task_data", {}).get("review_id") == task.review_id), None)
+                    if review_record:
+                        await tx.taskauditlog.create(data={
+                            "taskId": created.id,
+                            "previousStatus": None,
+                            "newStatus": "VERIFIED",
+                            "changedBy": review_record.get("reviewer_id") or "unknown",
+                            "reason": review_record.get("comment") or "Human review decision: " + review_record["action"],
+                            "metadata": {"review_id": review_record["review_id"], "action": review_record["action"]},
+                        })
+
+                for record in state.human_review_records:
+                    prior = await tx.aiauditlog.find_first(where={"reviewId": record["review_id"]})
+                    if not prior:
+                        await tx.aiauditlog.create(data={
+                            "tenantId": state.tenant_id,
+                            "meetingId": state.meeting_id,
+                            "reviewId": record["review_id"],
+                            "decisionType": "HUMAN_REVIEW_" + record["action"],
+                            "model": "human-review",
+                            "structuredOutput": record["task_data"],
+                            "verificationResult": {
+                                "action": record["action"],
+                                "reviewer_id": record.get("reviewer_id"),
+                                "comment": record.get("comment"),
+                            },
+                        })
+                    await tx.humanreview.update(
+                        where={"reviewId": record["review_id"]},
+                        data={
+                            "status": {"APPROVE": "APPROVED", "REJECT": "REJECTED", "MODIFY": "MODIFIED"}[record["action"]],
+                            "reviewerId": record.get("reviewer_id"),
+                            "reviewerComment": record.get("comment"),
+                            "decisionPayload": {
+                                "action": record["action"],
+                                "modifications": record.get("modifications"),
+                                "comment": record.get("comment"),
+                            },
+                            "reviewedAt": datetime.utcnow(),
+                        },
+                    )
+
+                await tx.meeting.update(
+                    where={"id": state.meeting_id},
+                    data={"status": "EXTRACTED"},
                 )
-                
-                data = task_create.model_dump(exclude_none=True)
-                
-                # Map to camelCase for Prisma and stringify UUIDs
-                prisma_data = {
-                    "tenantId": str(data["tenant_id"]),
-                    "meetingId": str(data["meeting_id"]),
-                    "title": data["title"],
-                    "description": data["description"],
-                    "taskType": data["task_type"],
-                    "status": initial_status.value if hasattr(initial_status, 'value') else initial_status,
-                    "priority": data.get("priority"),
-                    "assigneeHint": data.get("assignee_hint"),
-                    "assigneeId": task.assignee_id,
-                    "assigneeResolvedBy": task.assignee_resolved_by,
-                    "deadlineHint": data.get("deadline_hint"),
-                    "transcriptWordStart": data["transcript_word_start"],
-                    "transcriptWordEnd": data["transcript_word_end"],
-                    "sourceQuote": data["source_quote"],
-                    "verificationStatus": data["verification_status"],
-                    "verificationReasoning": data.get("verification_reasoning"),
-                    "extractionConfidence": data["extraction_confidence"],
-                    "externalId": data.get("external_id"),
-                    "externalUrl": data.get("external_url"),
-                    "integrationId": str(data["integration_id"]) if data.get("integration_id") else None,
-                }
-                
-                # Remove None values so Prisma defaults can apply
-                prisma_data = {k: v for k, v in prisma_data.items() if v is not None}
-                
-                created = await db.task.create(data=prisma_data)
-                created_tasks.append(created)
-                
-                # Update task_id in HITL payload if this was the interrupted task
-                if state.interrupted and state.interrupt_payload:
-                    state.interrupt_payload["task_id"] = str(created.id)
-            
-            # Update meeting status
-            await db.meeting.update(
-                where={"id": state.meeting_id},
-                data={"status": "EXTRACTED"},
-            )
-            
-            logger.info(f"Persisted {len(created_tasks)} tasks for meeting {state.meeting_id}")
-            genai_tracer.log_pipeline_step("persistence", "completed", tasks_persisted=len(created_tasks))
-            
+            logger.info("Persisted %s new tasks for meeting %s", created_count, state.meeting_id)
+            genai_tracer.log_pipeline_step("persistence", "completed", tasks_persisted=created_count)
+            return state
         except Exception as e:
-            logger.error(f"Persistence failed: {e}")
-            state.errors.append(f"Persistence failed: {str(e)}")
+            logger.exception("Persistence failed for meeting %s", state.meeting_id)
+            state.errors.append(f"Persistence failed: {e}")
             genai_tracer.log_pipeline_step("persistence", "failed", error=str(e))
-        
-        return state
+            raise
 
 
 # ─── Build Graph with Interrupt Support ───
 
 # ─── Shared Checkpointer ───
-# A single process-wide MemorySaver so that run / resume / status all operate
-# on the same thread state. A fresh MemorySaver per call made HITL resume and
-# status endpoints operate on empty graphs.
-# (Still per-process; swap for a persistent Postgres/Redis checkpointer before
-# scaling beyond a single API instance.)
+# A process-wide reference to the configured saver. Production initializes a
+# Postgres saver during API/worker startup; memory is development-only.
 
 from app.ai.agents.checkpointer import get_shared_checkpointer  # re-export for callers
 
@@ -849,6 +897,7 @@ def build_extraction_graph() -> StateGraph:
     workflow.add_node("extraction", extraction_node)
     workflow.add_node("deduplication", deduplication_node)
     workflow.add_node("verification", verification_node)
+    workflow.add_node("human_review", human_review_node)
     workflow.add_node("entity_resolution", entity_resolution_node)
     workflow.add_node("persistence", persistence_node)
 
@@ -858,13 +907,13 @@ def build_extraction_graph() -> StateGraph:
     workflow.add_edge("chunking", "extraction")
     workflow.add_edge("extraction", "deduplication")
     workflow.add_edge("deduplication", "verification")
-    workflow.add_edge("verification", "entity_resolution")
+    workflow.add_edge("verification", "human_review")
+    workflow.add_edge("human_review", "entity_resolution")
     workflow.add_edge("entity_resolution", "persistence")
     workflow.add_edge("persistence", END)
 
-    # Compile with the SHARED checkpointer so run/resume/status all see the
-    # same thread state. A fresh MemorySaver per call made HITL resume and
-    # status endpoints operate on empty graphs.
+    # Compile with the shared persistent saver so all API/worker processes see
+    # the same interrupted thread state.
     app = workflow.compile(
         checkpointer=get_shared_checkpointer(),
     )
@@ -918,8 +967,18 @@ async def resume_extraction_pipeline(
     graph = build_extraction_graph()
     config = {"configurable": {"thread_id": meeting_id}}
     
-    # Resume with human feedback
-    final_state = await graph.ainvoke({"human_feedback": human_feedback}, config=config)
+    checkpoint = await graph.aget_state(config)
+    values = checkpoint.values if checkpoint and checkpoint.values else {}
+    previous_feedback = values.get("human_feedback")
+    if previous_feedback and not values.get("interrupted"):
+        if previous_feedback != human_feedback:
+            raise ValueError("A different human review decision is already checkpointed")
+        # The review was accepted, but a later graph node may have failed. Keep
+        # executing from the durable checkpoint instead of applying the same
+        # interrupt payload twice.
+        final_state = await graph.ainvoke(None, config=config)
+    else:
+        final_state = await graph.ainvoke(Command(resume=human_feedback), config=config)
     
     logger.info(f"Extraction pipeline resumed for meeting {meeting_id}")
     return final_state
@@ -932,7 +991,7 @@ async def get_pipeline_state(meeting_id: str) -> Optional[ExtractionState]:
     
     try:
         state = await graph.aget_state(config)
-        return state.values if state else None
+        return ExtractionState.model_validate(state.values) if state and state.values else None
     except Exception as e:
         logger.error(f"Failed to get pipeline state for {meeting_id}: {e}")
         return None

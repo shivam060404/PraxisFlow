@@ -409,42 +409,39 @@ async def get_eu_ai_act_status(
     """
     EU AI Act readiness computed from verifiable system state.
 
-    Each flag reflects an implemented control (code or shipped documentation):
-      - record_keeping: AI audit log entries exist for this tenant (Art. 12)
-      - human_oversight: HITL verification workflow is wired (Art. 14)
-      - technical_documentation: model cards + architecture docs shipped (Art. 11)
-    Formal conformity assessment (Art. 43) has NOT been performed — the
-    overall_compliant flag therefore stays False until external assessment.
+    These flags report repository capabilities or observed tenant activity,
+    not a legal compliance determination. Formal conformity assessment has
+    not been performed and overall_compliant therefore remains False.
     """
     db = await get_prisma()
 
     ai_audit_logs = await db.aiauditlog.count(where={"tenantId": subject.tenant_id})
-    reviewed_tasks = await db.task.count(
+    human_review_decisions = await db.humanreview.count(
         where={
             "tenantId": subject.tenant_id,
-            "verificationStatus": {"in": ["VERIFIED", "NEEDS_REVIEW"]},
+            "status": {"in": ["APPROVED", "REJECTED", "MODIFIED"]},
         }
     )
 
     record_keeping = ai_audit_logs > 0
-    human_oversight_in_use = reviewed_tasks > 0
+    human_oversight_in_use = human_review_decisions > 0
 
     # Documentation exists (ARCHITECTURE.md, COMPLIANCE.md, model cards file)
     from pathlib import Path
 
-    backend_root = Path(__file__).resolve().parents[2]
+    repository_root = Path(__file__).resolve().parents[3]
     docs_ok = all(
-        (backend_root / rel).exists()
+        (repository_root / rel).exists()
         for rel in ["docs/COMPLIANCE.md", "ARCHITECTURE.md", "backend/config/model_cards.json"]
     )
 
     return EuAiActComplianceStatus(
-        risk_management_system=bool(docs_ok),       # risk register in COMPLIANCE.md
-        data_governance=True,                        # PII redaction pre-LLM implemented
+        risk_management_system=False,               # no maintained risk register/evidence in this repository
+        data_governance=False,                       # redaction exists; governance evidence is external
         technical_documentation=bool(docs_ok),       # Art. 11 artifacts present
         record_keeping=record_keeping,
-        transparency=True,                           # AI-disclosure in product UI/docs
-        human_oversight=human_oversight_in_use or True,  # workflow present even if unused yet
+        transparency=False,                          # user-facing disclosure has not been verified
+        human_oversight=human_oversight_in_use,
         accuracy_robustness=False,                   # continuous evals not yet running
         cybersecurity=False,                         # no pen test performed
         overall_compliant=False,                     # requires formal conformity assessment
@@ -466,7 +463,7 @@ async def get_gdpr_status(
     pii_enabled = getattr(settings, "PII_REDACTION_ENABLED", False)
 
     return GdprComplianceStatus(
-        lawful_basis_documented=True,            # documented in COMPLIANCE.md
+        lawful_basis_documented=False,           # this is an organization/legal determination
         dpia_completed=False,                    # DPIA not yet produced
         dpia_last_reviewed=None,
         data_processing_agreements=False,        # DPAs are an org-level action, not code

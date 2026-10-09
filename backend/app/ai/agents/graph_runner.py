@@ -1,8 +1,5 @@
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from typing import Dict, Any, Optional, AsyncGenerator
 import logging
-import asyncio
 from uuid import uuid4
 
 from app.ai.agents.schemas import ExtractionState
@@ -120,30 +117,6 @@ def _calculate_progress(node_name: str) -> float:
         "persistence": 1.0,
     }
     return progress_map.get(node_name, 0.0)
-
-
-# ─── HITL Helper Functions ───
-
-def create_hitl_approval_feedback(task_id: str, approved: bool = True) -> Dict[str, Any]:
-    """Create human feedback for task approval."""
-    return {
-        "action": "APPROVE" if approved else "REJECT",
-        "task_id": task_id,
-        "timestamp": asyncio.get_event_loop().time(),
-    }
-
-
-def create_hitl_modification_feedback(
-    task_id: str,
-    modifications: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Create human feedback with task modifications."""
-    return {
-        "action": "MODIFY",
-        "task_id": task_id,
-        "modifications": modifications,
-        "timestamp": asyncio.get_event_loop().time(),
-    }
 
 
 # ─── Pipeline Status Check ───

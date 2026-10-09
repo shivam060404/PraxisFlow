@@ -147,6 +147,15 @@ class GuardrailsManager:
                     "action": "error",
                     "message": str(e),
                 })
+                from app.core.config import settings
+                if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                    return {
+                        "allowed": False,
+                        "prompt": modified_prompt,
+                        "results": results,
+                        "blocked_by": guardrail.name,
+                        "reason": "Input guardrail failed; production policy is fail-closed",
+                    }
 
         return {
             "allowed": True,
@@ -189,7 +198,7 @@ class GuardrailsManager:
                     "metadata": result.metadata,
                 })
 
-                if result.action.value == "fallback":
+                if result.action.value in ("fallback", "block"):
                     return {
                         "allowed": False,
                         "fallback": True,
@@ -205,6 +214,13 @@ class GuardrailsManager:
                     "action": "error",
                     "message": str(e),
                 })
+                from app.core.config import settings
+                if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                    return {
+                        "allowed": False,
+                        "results": results,
+                        "reason": "Runtime guardrail failed; production policy is fail-closed",
+                    }
 
         return {"allowed": True, "results": results}
 
@@ -272,6 +288,26 @@ class GuardrailsManager:
                     "action": "error",
                     "message": str(e),
                 })
+                from app.core.config import settings
+                if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                    return {
+                        "allowed": False,
+                        "response": "",
+                        "results": results,
+                        "blocked_by": guardrail.name,
+                        "reason": "Output guardrail failed; production policy is fail-closed",
+                    }
+
+        if route_to_human:
+            return {
+                "allowed": False,
+                "response": "",
+                "results": results,
+                "blocked_by": "human_review_required",
+                "reason": "; ".join(human_review_reasons) or "Output requires human review",
+                "route_to_human": True,
+                "human_review_reasons": human_review_reasons,
+            }
 
         return {
             "allowed": True,

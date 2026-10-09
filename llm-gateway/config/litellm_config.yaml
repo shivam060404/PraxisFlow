@@ -3,7 +3,7 @@
 
 # ─── General Settings ───
 general_settings:
-  master_key: "${LITELLM_MASTER_KEY:-sk-proxy-master-key-change-in-production}"
+  master_key: "os.environ/LITELLM_MASTER_KEY"
   max_request_size_mb: 100
   drop_params: true
   request_timeout: 120
@@ -17,9 +17,33 @@ general_settings:
     X-PraxisFlow-Source: "llm-gateway"
     X-PraxisFlow-Version: "2.0"
 
-# ─── Model List (Populated from routing_policies.yaml at runtime) ───
-# This is a template - actual models loaded from routing_policies.yaml
-model_list: []
+# Model aliases match the model IDs selected by the application routing policy.
+# Keep this list in sync with backend/app/clients/llm_gateway/routing.py.
+model_list:
+  - model_name: groq/llama-3.3-70b-versatile
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: openai/gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: openai/gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: anthropic/claude-sonnet-4-20250514
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: openai/text-embedding-3-large
+    litellm_params:
+      model: openai/text-embedding-3-large
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: cohere/embed-v3
+    litellm_params:
+      model: cohere/embed-english-v3.0
+      api_key: os.environ/COHERE_API_KEY
 
 # ─── Router Settings ───
 router_settings:

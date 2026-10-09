@@ -93,7 +93,7 @@ class PIIRedactionService:
                 "end": result.end,
                 "type": result.entity_type,
                 "score": result.score,
-                "original_text": text[result.start:result.end],
+                # Never retain the matched raw PII in audit metadata.
             })
         
         return {

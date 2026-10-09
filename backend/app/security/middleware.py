@@ -79,8 +79,12 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Invalid or expired token"},
             )
 
+        from app.db.prisma import set_request_tenant, reset_request_tenant
+        tenant_context_token = set_request_tenant(verified.tenant_id)
+
         # Verify the tenant exists and is active (cached briefly per process)
         if not await self._verify_tenant(verified.tenant_id):
+            reset_request_tenant(tenant_context_token)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Tenant not found or inactive"},
@@ -94,18 +98,12 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
         request.state.claims = verified.claims
 
         # Bind the RLS context for this async context; used by tenant_tx()
-        from app.db.prisma import set_request_tenant
-
-        set_request_tenant(verified.tenant_id)
-
-        # NOTE: Postgres RLS is NOT yet enforced on Prisma-generated tables.
-        # Tenant isolation is enforced at the application layer until the
-        # schema is aligned (@@map + RLS policies). Do not rely on RLS here.
-
-        response = await call_next(request)
-        response.headers["X-Tenant-ID"] = verified.tenant_id
-
-        return response
+        try:
+            response = await call_next(request)
+            response.headers["X-Tenant-ID"] = verified.tenant_id
+            return response
+        finally:
+            reset_request_tenant(tenant_context_token)
 
     _tenant_cache: Dict[str, tuple] = {}
 

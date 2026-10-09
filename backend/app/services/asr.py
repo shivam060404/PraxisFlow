@@ -179,14 +179,16 @@ class DeepgramASRService:
         return result
 
     def _apply_pii_redaction(self, transcript: "TranscriptResult") -> None:
-        """Redact PII from transcript text when enabled. Never blocks ingestion."""
+        """Redact before persistence; fail closed when production policy requires it."""
         if not getattr(settings, "PII_REDACTION_ENABLED", True):
             return
 
         try:
             from app.services.pii_redaction import redact_text as _redact_text
 
-            redacted_any = False
+            full_text_outcome = _redact_text(transcript.full_text)
+            transcript.full_text = full_text_outcome["text"]
+            redacted_any = bool(full_text_outcome.get("has_redactions"))
             for utt in transcript.utterances:
                 outcome = _redact_text(utt.get("text", ""))
                 if outcome.get("has_redactions"):
@@ -198,19 +200,21 @@ class DeepgramASRService:
                     )
                     redacted_any = True
 
+            if transcript.utterances:
+                # Use the same redacted utterance representation used by the
+                # extraction path; when it differs from full channel text,
+                # prefer the normalized diarized text after redaction.
+                transcript.full_text = " ".join(u["text"] for u in transcript.utterances)
+            transcript.word_count = len(transcript.full_text.split())
             if redacted_any:
-                transcript.full_text = " ".join(
-                    u["text"] for u in transcript.utterances
-                ) if transcript.utterances else transcript.full_text
-                transcript.word_count = len(transcript.full_text.split())
                 transcript.redaction_applied = True
                 logger.info(
                     f"PII redaction applied to transcript {transcript.id}"
                 )
-        except ImportError as e:
-            logger.warning(f"PII redaction unavailable ({e}); storing unredacted")
         except Exception as e:
-            logger.warning(f"PII redaction failed ({e}); storing unredacted")
+            if settings.ENVIRONMENT.lower() in {"production", "prod"} or getattr(settings, "PII_REDACTION_FAIL_CLOSED", False):
+                raise RuntimeError("PII redaction failed; refusing to store an unredacted transcript") from e
+            logger.warning("PII redaction failed in development; transcript remains unredacted: %s", e)
 
     @staticmethod
     def _rebuild_word_timings(

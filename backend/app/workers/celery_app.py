@@ -1,5 +1,5 @@
 from celery import Celery
-from celery.signals import worker_init, worker_shutdown
+from celery.signals import worker_process_init, worker_process_shutdown
 import asyncio
 import logging
 
@@ -41,24 +41,34 @@ celery_app.conf.task_routes = {
 }
 
 
-@worker_init.connect
-def init_worker(**kwargs):
+@worker_process_init.connect
+def init_worker_process(**kwargs):
     """Initialize per-process resources (DB + persistent checkpointer)."""
     import asyncio
     from app.ai.agents.checkpointer import init_checkpointer
 
     try:
-        asyncio.run(init_checkpointer())
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"Checkpointer init failed in worker: {e}")
-    """Initialize worker resources."""
-    logger.info("Celery worker initializing")
+        settings.validate_security_settings()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_checkpointer())
+    except Exception:
+        logger.exception("Celery worker process initialization failed")
+        raise
+    logger.info("Celery worker process initialized")
 
 
-@worker_shutdown.connect
-def shutdown_worker(**kwargs):
+@worker_process_shutdown.connect
+def shutdown_worker_process(**kwargs):
     """Cleanup worker resources."""
-    logger.info("Celery worker shutting down")
+    try:
+        from app.ai.agents.checkpointer import close_checkpointer
+        loop = asyncio.get_event_loop()
+        if not loop.is_closed():
+            loop.run_until_complete(close_checkpointer())
+    except Exception:
+        logger.exception("Error closing worker resources")
+    logger.info("Celery worker process shutting down")
 
 
 # ─── Async Task Wrapper ───

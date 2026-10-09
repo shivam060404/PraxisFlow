@@ -70,6 +70,8 @@ class TokenBudgetManager:
             self._redis_available = True
             logger.info("Budget manager: Redis backend")
         except Exception as e:
+            if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                raise RuntimeError(f"Redis is required for production token budgets: {e}") from e
             logger.warning(f"Budget manager: Redis unavailable ({e}); using in-process counters")
             self._redis = None
             self._redis_available = False
@@ -115,6 +117,8 @@ class TokenBudgetManager:
                 value = await client.get(self._day_key(scope, identifier))
                 return int(value or 0)
             except Exception as e:
+                if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                    raise RuntimeError(f"Redis token budget read failed: {e}") from e
                 logger.warning(f"Budget read failed ({e}); using local counter")
                 self._redis_available = False
 
@@ -150,6 +154,8 @@ class TokenBudgetManager:
                     await r.expire(day_key, config.reset_interval_seconds * 2)
                 used = new_total
             except Exception as e:
+                if settings.ENVIRONMENT.lower() in {"production", "prod"}:
+                    raise RuntimeError(f"Redis token budget write failed: {e}") from e
                 logger.warning(f"Budget write failed ({e}); using local counter")
                 self._redis_available = False
                 used = None

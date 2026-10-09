@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 import os
+from urllib.parse import urlparse
 
 
 class Settings(BaseSettings):
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql://ami:ami_dev_password@localhost:5432/ami"
+    RLS_ENFORCED: bool = False
 
     # Qdrant
     QDRANT_URL: str = "http://localhost:6333"
@@ -65,17 +67,32 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT.lower() in {'production', 'prod'}:
             if not self.JWT_SECRET or self.JWT_SECRET == 'dev_secret_change_in_production':
                 raise ValueError('JWT_SECRET must be a strong unique value in production')
-            if not self.CLERK_SECRET_KEY:
-                import logging
-                logging.getLogger(__name__).warning(
-                    'Production without Clerk configured: falling back to local HS256 auth'
-                )
+            if not self.CLERK_SECRET_KEY or not (self.CLERK_ISSUER or self.CLERK_JWKS_URL):
+                raise ValueError('Production requires Clerk credentials and an issuer/JWKS URL')
+            if not self.PII_REDACTION_ENABLED:
+                raise ValueError('PII_REDACTION_ENABLED cannot be disabled in production')
+            if not self.LLM_GATEWAY_URL or not self.LLM_GATEWAY_MASTER_KEY:
+                raise ValueError('Production requires LLM_GATEWAY_URL and LLM_GATEWAY_MASTER_KEY')
+            if not self.DEEPGRAM_API_KEY:
+                raise ValueError('Production requires DEEPGRAM_API_KEY')
+            if self.CHECKPOINTER_BACKEND != 'postgres':
+                raise ValueError('Production requires CHECKPOINTER_BACKEND=postgres')
+            if not self.RLS_ENFORCED:
+                raise ValueError('Production requires RLS_ENFORCED=true')
+            if not self.WEBHOOK_LOOKUP_DATABASE_URL:
+                raise ValueError('Production requires WEBHOOK_LOOKUP_DATABASE_URL for signed webhook lookup')
+            if urlparse(self.DATABASE_URL).username != 'praxisflow_app':
+                raise ValueError('Production DATABASE_URL must use the restricted praxisflow_app role')
+            if urlparse(self.WEBHOOK_LOOKUP_DATABASE_URL).username != 'praxisflow_webhook_lookup':
+                raise ValueError('WEBHOOK_LOOKUP_DATABASE_URL must use praxisflow_webhook_lookup')
 
     # Langfuse
     LANGFUSE_PUBLIC_KEY: Optional[str] = None
     LANGFUSE_SECRET_KEY: Optional[str] = None
     LANGFUSE_HOST: str = "http://localhost:3000"
     LLM_GATEWAY_URL: Optional[str] = None  # LiteLLM proxy; unset = not deployed
+    LLM_GATEWAY_MASTER_KEY: Optional[str] = None
+    WEBHOOK_LOOKUP_DATABASE_URL: Optional[str] = None
 
     # Deepgram Options
     DEEPGRAM_MODEL: str = "nova-2"
@@ -87,6 +104,7 @@ class Settings(BaseSettings):
 
     # GDPR: redact PII from transcripts before persistence and LLM calls
     PII_REDACTION_ENABLED: bool = True
+    PII_REDACTION_FAIL_CLOSED: bool = False
 
     # Retention window for audit logs (EU AI Act Art. 19 / GDPR)
     AUDIT_RETENTION_DAYS: int = 2555  # 7 years

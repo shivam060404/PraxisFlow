@@ -122,39 +122,51 @@ class KafkaConsumerManager:
         logger.info(f"Processing meeting uploaded: {meeting_id}")
         
         # Queue ASR task via Celery
-        process_meeting.delay(meeting_id)
+        if not tenant_id:
+            raise ValueError("meeting.uploaded event must include tenant_id")
+        process_meeting.delay(meeting_id, tenant_id)
     
     async def handle_transcript_completed(self, event: Dict[str, Any]):
         """Handle transcript completed - trigger extraction."""
         meeting_id = event.get("meeting_id")
+        tenant_id = event.get("tenant_id")
         
         logger.info(f"Transcript completed for meeting: {meeting_id}")
         
         # Queue extraction task
-        run_extraction.delay(meeting_id)
+        if not tenant_id:
+            raise ValueError("transcript.completed event must include tenant_id")
+        run_extraction.delay(meeting_id, tenant_id)
     
     async def handle_task_verified(self, event: Dict[str, Any]):
         """Handle task verified - trigger entity resolution."""
         task_id = event.get("task_id")
+        tenant_id = event.get("tenant_id")
         status = event.get("verification_status")
         
         if status == "VERIFIED":
             logger.info(f"Task verified, resolving assignee: {task_id}")
-            resolve_assignee.delay(task_id)
+            if not tenant_id:
+                raise ValueError("task.verified event must include tenant_id")
+            resolve_assignee.delay(task_id, tenant_id)
         elif status == "NEEDS_REVIEW":
             logger.info(f"Task needs review: {task_id}")
     
     async def handle_task_assigned(self, event: Dict[str, Any]):
         """Handle task assigned - trigger sync to integrations."""
         task_id = event.get("task_id")
+        tenant_id = event.get("tenant_id")
         
         logger.info(f"Task assigned, syncing to integrations: {task_id}")
         
-        sync_task_to_integrations.delay(task_id)
+        if not tenant_id:
+            raise ValueError("task.assigned event must include tenant_id")
+        sync_task_to_integrations.delay(task_id, tenant_id)
     
     async def handle_sync_requested(self, event: Dict[str, Any]):
         """Handle sync requested - retry sync."""
         task_id = event.get("task_id")
+        tenant_id = event.get("tenant_id")
         integration_id = event.get("integration_id")
         retry_count = event.get("retry_count", 0)
         
@@ -162,7 +174,9 @@ class KafkaConsumerManager:
         
         # This would call the sync function directly
         # For now, use Celery
-        retry_failed_sync.delay(task_id, integration_id)
+        if not tenant_id:
+            raise ValueError("sync.requested event must include tenant_id")
+        retry_failed_sync.delay(task_id, tenant_id, integration_id)
     
     async def handle_integration_webhook(self, event: Dict[str, Any]):
         """Handle integration webhook — update task status from external system."""
@@ -257,7 +271,7 @@ async def send_integration_sync(tenant_id: str, integration_id: str) -> None:
         f"Queueing sync for {len(tasks)} task(s) on integration {integration_id}"
     )
     for task in tasks:
-        retry_failed_sync.delay(task.id, integration_id)
+        retry_failed_sync.delay(task.id, tenant_id, integration_id)
 
 
 # Startup/shutdown handlers

@@ -9,6 +9,7 @@ name: CI
 # those artifacts are real.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -19,6 +20,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  live-ai-evaluation:
+    name: AI extraction — live gold-set evaluation
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Generate Prisma client
+        env:
+          DATABASE_URL: postgresql://unused:unused@localhost:5432/unused
+        run: prisma generate
+      - name: Evaluate extraction quality
+        env:
+          ENVIRONMENT: test
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python scripts/run_ai_eval.py --min-precision 0.80 --min-recall 0.80 --min-grounding 0.95 --output eval-results.json
+      - name: Upload evaluation result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-evaluation-results
+          path: backend/eval-results.json
+          if-no-files-found: ignore
+
   backend-tests:
     name: Backend — pytest
     runs-on: ubuntu-latest

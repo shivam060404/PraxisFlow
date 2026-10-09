@@ -102,7 +102,7 @@ async def upload_meeting(
         )
         
         # Queue processing job
-        process_meeting.delay(str(meeting_id))
+        process_meeting.delay(str(meeting_id), tenant_id)
         
         return meeting
     except Exception as e:
@@ -278,7 +278,7 @@ async def reprocess_meeting(
         data={"status": "UPLOADED"},
     )
     
-    process_meeting.delay(str(meeting_id))
+    process_meeting.delay(str(meeting_id), subject.tenant_id)
     
     return {"message": "Meeting queued for reprocessing", "meeting_id": str(meeting_id)}
 

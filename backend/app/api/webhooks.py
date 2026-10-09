@@ -15,16 +15,13 @@ from typing import Literal
 from fastapi import APIRouter, Request, HTTPException, Header, Depends, status
 from pydantic import BaseModel
 
-from app.db.prisma import get_prisma
+from app.db.prisma import get_prisma, get_webhook_lookup_prisma, set_request_tenant, reset_request_tenant
 from app.integrations.factory import IntegrationAdapterFactory
 from app.security import require_permission, Permission
 from app.ai.agents.graph_runner import (
     resume_extraction_pipeline_wrapper,
     check_pipeline_status,
-    create_hitl_approval_feedback,
-    create_hitl_modification_feedback,
 )
-from app.ai.agents.schemas import HITLPayload
 
 logger = logging.getLogger(__name__)
 
@@ -172,9 +169,10 @@ async def receive_webhook(
     if not verifier:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
-    db = await get_prisma()
-    integrations = await db.integration.find_many(
-        where={"provider": provider_l, "status": "ACTIVE"}
+    lookup_db = await get_webhook_lookup_prisma()
+    integrations = await lookup_db.integration.find_many(
+        where={"provider": provider_l, "status": "ACTIVE"},
+        select={"id": True, "tenantId": True, "provider": True, "status": True, "webhookSecret": True},
     )
 
     if not integrations:
@@ -184,7 +182,7 @@ async def receive_webhook(
     integration = None
     verification_error = None
     for candidate in integrations:
-        secret = candidate.webhookSecret or x_webhook_secret
+        secret = candidate.webhookSecret
         if not secret:
             continue
         result = await verifier.verify(request, secret)
@@ -213,7 +211,11 @@ async def receive_webhook(
         adapter = IntegrationAdapterFactory.get_adapter(provider_l)
         event = adapter.normalize_webhook(payload)
 
-        await _process_webhook_event(provider_l, event, integration)
+        tenant_token = set_request_tenant(integration.tenantId)
+        try:
+            await _process_webhook_event(provider_l, event, integration)
+        finally:
+            reset_request_tenant(tenant_token)
 
         return {"status": "ok"}
 
@@ -394,7 +396,7 @@ async def test_webhook(
 
 class HITLTaskFeedback(BaseModel):
     """Feedback for a single task in HITL review."""
-    task_id: str  # Task title or identifier
+    task_id: str  # Stable review ID returned by the interrupted graph
     action: Literal["APPROVE", "REJECT", "MODIFY"]
     modifications: Optional[Dict[str, Any]] = None
 
@@ -430,10 +432,76 @@ async def hitl_resume_pipeline(
     This endpoint is called by the frontend when a human approves/rejects/modifies
     tasks that were flagged for review during the verification step.
     """
-    # Build human feedback dict for multiple tasks
+    db = await get_prisma()
+    tenant_id = getattr(current_user, "tenant_id", None)
+    reviewer_id = getattr(current_user, "id", None)
+    meeting = await db.meeting.find_first(where={"id": request.meeting_id, "tenantId": tenant_id})
+    if not tenant_id or not reviewer_id or not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if not request.tasks:
+        raise HTTPException(status_code=422, detail="At least one pending task decision is required")
+    if len({item.task_id for item in request.tasks}) != len(request.tasks):
+        raise HTTPException(status_code=422, detail="Each pending task must have exactly one decision")
+    review_ids = {item.task_id for item in request.tasks}
+    review_rows = await db.humanreview.find_many(
+        where={
+            "tenantId": tenant_id,
+            "meetingId": request.meeting_id,
+            "reviewId": {"in": list(review_ids)},
+        },
+        select={"reviewId": True, "status": True, "reviewerId": True, "decisionPayload": True},
+    )
+    if {row.reviewId for row in review_rows} != review_ids:
+        raise HTTPException(status_code=409, detail="Review set is stale or incomplete; refresh pending reviews")
+
+    requested_decisions = {
+        item.task_id: {
+            "action": item.action,
+            "modifications": item.modifications,
+            "comment": request.comment,
+        }
+        for item in request.tasks
+    }
+    final_status = {"APPROVE": "APPROVED", "REJECT": "REJECTED", "MODIFY": "MODIFIED"}
+    if all(
+        row.status == final_status[requested_decisions[row.reviewId]["action"]]
+        and row.reviewerId == reviewer_id
+        and row.decisionPayload == requested_decisions[row.reviewId]
+        for row in review_rows
+    ):
+        return {
+            "status": "already_completed",
+            "meeting_id": request.meeting_id,
+            "tasks_finalized": len(review_rows),
+            "errors": [],
+        }
+
+    if any(row.status == "IN_REVIEW" and row.reviewerId != reviewer_id for row in review_rows):
+        raise HTTPException(status_code=409, detail="Another reviewer is processing this decision")
+    if any(row.status not in {"PENDING", "IN_REVIEW"} for row in review_rows):
+        raise HTTPException(status_code=409, detail="Review set has already been finalized")
+
+    # Compare-and-set claims the complete review set so concurrent submissions
+    # cannot resume the same LangGraph thread at the same time. A reviewer may
+    # retry their own IN_REVIEW set after a transient failure.
+    pending_count = sum(row.status == "PENDING" for row in review_rows)
+    if pending_count:
+        claimed = await db.humanreview.update_many(
+            where={
+                "tenantId": tenant_id,
+                "meetingId": request.meeting_id,
+                "reviewId": {"in": list(review_ids)},
+                "status": "PENDING",
+            },
+            data={"status": "IN_REVIEW", "reviewerId": reviewer_id},
+        )
+        if claimed.count != pending_count:
+            raise HTTPException(status_code=409, detail="Another reviewer is processing this decision")
+
+    # Reviewer identity is taken from the verified token, never the request.
     feedback = {
         "tasks": [],
-        "reviewer_id": request.reviewer_id or current_user.id,
+        "reviewer_id": reviewer_id,
         "comment": request.comment,
     }
     
@@ -453,13 +521,28 @@ async def hitl_resume_pipeline(
         return {
             "status": "resumed",
             "meeting_id": request.meeting_id,
-            "tasks_finalized": len(final_state.final_tasks) if final_state.final_tasks else 0,
-            "errors": final_state.errors,
+            "tasks_finalized": len(final_state.get("final_tasks", [])) if isinstance(final_state, dict) else len(final_state.final_tasks),
+            "errors": final_state.get("errors", []) if isinstance(final_state, dict) else final_state.errors,
         }
         
     except Exception as e:
+        try:
+            pipeline_status = await check_pipeline_status(request.meeting_id)
+            if pipeline_status.get("status") == "interrupted":
+                await db.humanreview.update_many(
+                    where={
+                        "tenantId": tenant_id,
+                        "meetingId": request.meeting_id,
+                        "reviewId": {"in": list(review_ids)},
+                        "status": "IN_REVIEW",
+                        "reviewerId": reviewer_id,
+                    },
+                    data={"status": "PENDING", "reviewerId": None},
+                )
+        except Exception:
+            logger.exception("Could not release or inspect failed HITL review claim")
         logger.error(f"HITL resume failed for meeting {request.meeting_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to resume pipeline: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to resume extraction pipeline")
 
 
 @router.get("/hitl/status/{meeting_id}", response_model=HITLStatusResponse)
@@ -473,13 +556,18 @@ async def hitl_pipeline_status(
     Returns whether the pipeline is running, completed, failed, or interrupted
     waiting for human review.
     """
+    db = await get_prisma()
+    tenant_id = getattr(current_user, "tenant_id", None)
+    meeting = await db.meeting.find_first(where={"id": meeting_id, "tenantId": tenant_id})
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
     status = await check_pipeline_status(meeting_id)
     return HITLStatusResponse(**status)
 
 
 @router.get("/hitl/pending", response_model=List[HITLStatusResponse])
 async def hitl_pending_reviews(
-    tenant_id: str,
+    tenant_id: Optional[str] = None,
     current_user = Depends(require_permission(Permission.TASK_READ)),
 ):
     """
@@ -487,9 +575,37 @@ async def hitl_pending_reviews(
     
     Useful for dashboard showing pending HITL tasks.
     """
-    # This would require a more complex query - for now return empty
-    # In production, you'd track interrupted pipelines in a separate table
-    return []
+    authenticated_tenant = getattr(current_user, "tenant_id", None)
+    if not authenticated_tenant or (tenant_id and tenant_id != authenticated_tenant):
+        raise HTTPException(status_code=403, detail="Tenant scope mismatch")
+    db = await get_prisma()
+    rows = await db.humanreview.find_many(
+        where={"tenantId": authenticated_tenant, "status": {"in": ["PENDING", "IN_REVIEW"]}},
+        order={"createdAt": "asc"},
+    )
+    grouped: Dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row.meetingId, []).append(row)
+    return [
+        HITLStatusResponse(
+            status="interrupted",
+            meeting_id=meeting_id,
+            progress=0.7,
+            interrupt_node="human_review",
+            interrupt_reason=f"{len(review_rows)} task(s) require human review",
+            interrupt_payload={"tasks": [
+                {
+                    "task_id": row.reviewId,
+                    "task_data": row.taskData,
+                    "transcript_evidence": row.transcriptEvidence,
+                    "interrupt_reason": row.reason,
+                    "confidence_score": row.confidence,
+                }
+                for row in review_rows
+            ]},
+        )
+        for meeting_id, review_rows in grouped.items()
+    ]
 
 
 # ─── Webhook Event Types for HITL ───

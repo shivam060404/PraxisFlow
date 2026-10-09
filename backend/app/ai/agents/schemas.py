@@ -41,6 +41,7 @@ class ExtractedTask(BaseModel):
     # HITL fields
     requires_human_review: bool = False
     human_review_reason: Optional[str] = None
+    review_id: Optional[str] = None
 
 
 class ExtractionResult(BaseModel):
@@ -66,6 +67,8 @@ class ExtractionState(BaseModel):
     current_chunk_index: int = 0
     proposed_tasks: List[ExtractedTask] = Field(default_factory=list)
     verified_tasks: List[ExtractedTask] = Field(default_factory=list)
+    pending_review_tasks: List[ExtractedTask] = Field(default_factory=list)
+    human_review_records: List[Dict[str, Any]] = Field(default_factory=list)
     deduplicated_tasks: List[ExtractedTask] = Field(default_factory=list)
     final_tasks: List[ExtractedTask] = Field(default_factory=list)
     meeting_summary: str = ""

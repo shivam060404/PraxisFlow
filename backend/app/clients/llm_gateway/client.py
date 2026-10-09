@@ -19,8 +19,6 @@ from app.core.config import settings
 from app.observability.otel import genai_tracer, LLMCallAttributes, trace_llm_call
 from app.ai.guardrails.manager import (
     guardrails_manager,
-    litellm_pre_call_hook,
-    litellm_post_call_hook,
 )
 from app.clients.llm_gateway.routing import ModelRouter, RoutingPolicy
 from app.clients.llm_gateway.budgets import TokenBudgetManager
@@ -90,10 +88,6 @@ class LLMGatewayClient:
         if anthropic_key:
             os.environ["ANTHROPIC_API_KEY"] = anthropic_key
 
-        # Register callbacks
-        litellm.success_callback = [litellm_post_call_hook]
-        litellm.failure_callback = [litellm_pre_call_hook]
-
         # Initialize components
         await self.router.initialize()
         await self.budget_manager.initialize()
@@ -146,13 +140,37 @@ class LLMGatewayClient:
             "pipeline_node": pipeline_node,
             "pipeline_run_id": pipeline_run_id,
             "model_config": model_config,
+            "transcript_context": "\n".join(str(message.get("content", "")) for message in messages),
         }
+
+        # Run controls in this client rather than relying on optional LiteLLM
+        # callback semantics. This path is shared by direct dev calls and the
+        # authenticated production proxy.
+        prompt_text = "\n".join(str(message.get("content", "")) for message in messages)
+        precheck = await guardrails_manager.pre_call_check(prompt_text, context)
+        if not precheck.get("allowed", False):
+            raise LLMGatewayError(f"Input blocked by guardrails: {precheck.get('reason', 'blocked')}")
+        if precheck.get("prompt") != prompt_text:
+            replacement = precheck["prompt"]
+            messages = [dict(message) for message in messages]
+            for message in reversed(messages):
+                if message.get("role") == "user":
+                    message["content"] = replacement
+                    break
+        runtime = await guardrails_manager.runtime_check(prompt_text, context)
+        if not runtime.get("allowed", False):
+            raise LLMGatewayError(f"Runtime guardrail blocked request: {runtime.get('reason', 'blocked')}")
 
         # Check cache first
         if use_cache and not stream:
             cache_key = self._generate_cache_key(messages, model_config, tenant_id)
             cached = await self.cache.get(cache_key)
             if cached:
+                output_check = await guardrails_manager.post_call_check(cached.get("content", ""), context)
+                if not output_check.get("allowed", False):
+                    raise LLMGatewayError(f"Cached output blocked by guardrails: {output_check.get('reason', 'blocked')}")
+                cached["content"] = output_check["response"]
+                cached["guardrail_results"] = precheck.get("results", []) + output_check.get("results", [])
                 logger.info(f"Cache hit for {pipeline_node} (tenant: {tenant_id})")
                 cached["cached"] = True
                 return GatewayResponse(**cached)
@@ -200,6 +218,16 @@ class LLMGatewayClient:
                         stream=stream,
                     )
 
+                    output_check = await guardrails_manager.post_call_check(
+                        response.choices[0].message.content or "",
+                        context,
+                    )
+                    if not output_check.get("allowed", False):
+                        raise LLMGatewayError(
+                            f"Model output blocked by guardrails: {output_check.get('reason', 'blocked')}"
+                        )
+                    response.choices[0].message.content = output_check["response"]
+
                     latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
 
                     # Record usage
@@ -231,7 +259,7 @@ class LLMGatewayClient:
                         cost_usd=cost,
                         latency_ms=latency_ms,
                         finish_reason=response.choices[0].finish_reason if response.choices else "stop",
-                        guardrail_results=getattr(response, "metadata", {}).get("guardrail_results", []),
+                        guardrail_results=precheck.get("results", []) + runtime.get("results", []) + output_check.get("results", []),
                     )
 
                     # Cache successful response
@@ -268,8 +296,14 @@ class LLMGatewayClient:
             "max_tokens": model_config.get("max_tokens", 4096),
             "timeout": model_config.get("timeout_ms", 30000) / 1000,
             "stream": stream,
-            "metadata": context,
+            "metadata": {key: value for key, value in context.items() if key != "transcript_context"},
         }
+
+        if settings.LLM_GATEWAY_URL:
+            # Production routes provider calls through the separately deployed
+            # LiteLLM proxy. Direct provider calls remain a local-dev option.
+            kwargs["api_base"] = settings.LLM_GATEWAY_URL.rstrip("/") + "/v1"
+            kwargs["api_key"] = settings.LLM_GATEWAY_MASTER_KEY
 
         if model_config.get("response_format"):
             kwargs["response_format"] = model_config["response_format"]
@@ -295,11 +329,15 @@ class LLMGatewayClient:
         if not budget_ok:
             raise BudgetExceededError(f"Token budget exceeded for tenant {tenant_id}")
 
-        response = await aembedding(
-            model=model,
-            input=texts,
-            metadata={"tenant_id": tenant_id, "user_id": user_id},
-        )
+        embedding_kwargs = {
+            "model": model,
+            "input": texts,
+            "metadata": {"tenant_id": tenant_id, "user_id": user_id},
+        }
+        if settings.LLM_GATEWAY_URL:
+            embedding_kwargs["api_base"] = settings.LLM_GATEWAY_URL.rstrip("/") + "/v1"
+            embedding_kwargs["api_key"] = settings.LLM_GATEWAY_MASTER_KEY
+        response = await aembedding(**embedding_kwargs)
 
         usage = response.usage
         cost = self._calculate_cost(model, usage.prompt_tokens, 0)

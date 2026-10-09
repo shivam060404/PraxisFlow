@@ -1,8 +1,6 @@
 # Production Docker Compose for PraxisFlow
 # Multi-service production deployment with health checks, logging, and monitoring
 
-version: '3.8'
-
 services:
   # ═══════════════════════════════════════════════════════════════
   # DATABASES
@@ -13,14 +11,12 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-praxisflow}
       POSTGRES_USER: ${POSTGRES_USER:-praxisflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a strong POSTGRES_PASSWORD}
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_primary_data:/var/lib/postgresql/data
       - ./infrastructure/docker/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-praxisflow} -d ${POSTGRES_DB:-praxisflow}"]
       interval: 10s
@@ -37,37 +33,12 @@ services:
           memory: 2G
     networks:
       - praxisflow-internal
+    restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
-  postgres-replica:
-    image: pgvector/pgvector:pg16
-    container_name: praxisflow-postgres-replica
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-praxisflow}
-      POSTGRES_USER: ${POSTGRES_USER:-praxisflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_MASTER_HOST: postgres-primary
-      POSTGRES_REPLICATION_MODE: replica
-      POSTGRES_REPLICATION_USER: replicator
-      POSTGRES_REPLICATION_PASSWORD: ${REPLICATION_PASSWORD}
-    volumes:
-      - postgres_replica_data:/var/lib/postgresql/data
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-praxisflow} -d ${POSTGRES_DB:-praxisflow}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    depends_on:
-      postgres-primary:
-        condition: service_healthy
-    networks:
-      - praxisflow-internal
 
   # ═══════════════════════════════════════════════════════════════
   # VECTOR DATABASE
@@ -79,13 +50,10 @@ services:
       QDRANT__SERVICE__HTTP_PORT: 6333
       QDRANT__SERVICE__GRPC_PORT: 6334
       QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
-      QDRANT__CLUSTER__ENABLED: "true"
+      QDRANT__CLUSTER__ENABLED: "false"
     volumes:
       - qdrant_data:/qdrant/storage
       - qdrant_snapshots:/qdrant/snapshots
-    ports:
-      - "6333:6333"
-      - "6334:6334"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
       interval: 10s
@@ -101,18 +69,16 @@ services:
           memory: 2G
     networks:
       - praxisflow-internal
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # GRAPH DATABASE
   # ═══════════════════════════════════════════════════════════════
   neo4j:
-    image: neo4j:5.24-enterprise
+    image: neo4j:5.24
     container_name: praxisflow-neo4j
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
-      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
-      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
-      NEO4J_dbms_security_procedures_unrestricted: apoc.*,gds.*
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set a strong NEO4J_PASSWORD}
       NEO4J_dbms_memory_heap_initial__size: 1G
       NEO4J_dbms_memory_heap_max__size: 4G
       NEO4J_dbms_memory_pagecache_size: 2G
@@ -120,11 +86,8 @@ services:
       - neo4j_data:/data
       - neo4j_logs:/logs
       - neo4j_import:/var/lib/neo4j/import
-    ports:
-      - "7474:7474"
-      - "7687:7687"
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD}", "RETURN 1"]
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}", "RETURN 1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -139,6 +102,7 @@ services:
           memory: 3G
     networks:
       - praxisflow-internal
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # MESSAGE QUEUE
@@ -165,8 +129,6 @@ services:
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes:
       - kafka_data:/var/lib/kafka/data
-    ports:
-      - "9092:9092"
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
@@ -182,6 +144,7 @@ services:
           memory: 2G
     networks:
       - praxisflow-internal
+    restart: unless-stopped
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -191,8 +154,6 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: ""
       AUTH_TYPE: DISABLED
-    ports:
-      - "8080:8080"
     depends_on:
       - kafka
     networks:
@@ -204,11 +165,9 @@ services:
   redis:
     image: redis:7-alpine
     container_name: praxisflow-redis
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -224,6 +183,7 @@ services:
           memory: 1G
     networks:
       - praxisflow-internal
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # OBJECT STORAGE
@@ -233,14 +193,11 @@ services:
     container_name: praxisflow-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-praxisflow}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set a unique MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set a strong MINIO_ROOT_PASSWORD}
       MINIO_PROMETHEUS_AUTH_TYPE: public
     volumes:
       - minio_data:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
@@ -248,22 +205,23 @@ services:
       retries: 3
     networks:
       - praxisflow-internal
+    restart: unless-stopped
 
   minio-init:
     image: minio/mc:latest
     container_name: praxisflow-minio-init
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set a unique MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set a strong MINIO_ROOT_PASSWORD}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY}
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      until (/usr/bin/mc config host add minio http://minio:9000 ${MINIO_ROOT_USER:-praxisflow} ${MINIO_ROOT_PASSWORD}) do echo '...waiting...' && sleep 1; done;
-      /usr/bin/mc mb minio/meeting-audio --ignore-existing;
-      /usr/bin/mc mb minio/meeting-transcripts --ignore-existing;
-      /usr/bin/mc mb minio/backups --ignore-existing;
-      /usr/bin/mc anonymous set public minio/meeting-transcripts;
-      exit 0;
-      "
+    entrypoint: ["/bin/sh", "/scripts/minio-init.sh"]
+    volumes:
+      - ./infrastructure/minio/policy-app.json:/policies/app.json:ro
+      - ./infrastructure/scripts/minio-init.sh:/scripts/minio-init.sh:ro
     networks:
       - praxisflow-internal
 
@@ -280,13 +238,12 @@ services:
       LITELLM_ROUTING_POLICIES: /app/routing_policies.yaml
       PORT: 4000
       HOST: 0.0.0.0
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set a strong LITELLM_MASTER_KEY}
       # Provider API keys (loaded from secrets)
-      GROQ_API_KEY: ${GROQ_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      COHERE_API_KEY: ${COHERE_API_KEY}
-      # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-praxisflow}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB:-praxisflow}
+      GROQ_API_KEY: ${GROQ_API_KEY:?Set GROQ_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY}
+      COHERE_API_KEY: ${COHERE_API_KEY:?Set COHERE_API_KEY}
       # Redis
       REDIS_URL: redis://redis:6379/1
       # Qdrant
@@ -300,9 +257,6 @@ services:
       LANGFUSE_HOST: http://langfuse:3000
       # Prometheus
       PROMETHEUS_PORT: 9090
-    ports:
-      - "4000:4000"
-      - "9090:9090"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health/liveliness"]
       interval: 30s
@@ -318,12 +272,15 @@ services:
           cpus: '1'
           memory: 1G
     depends_on:
-      - postgres-primary
-      - redis
-      - qdrant
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     networks:
       - praxisflow-internal
       - praxisflow-monitoring
+      - praxisflow-egress
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # BACKEND API
@@ -336,37 +293,40 @@ services:
     environment:
       ENVIRONMENT: production
       LOG_LEVEL: INFO
-      DATABASE_URL: postgresql://${POSTGRES_USER:-praxisflow}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB:-praxisflow}
+      DATABASE_URL: ${APP_DATABASE_URL:?Set APP_DATABASE_URL to the restricted praxisflow_app role connection string}
+      RLS_ENFORCED: "true"
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-praxisflow}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY}
       MINIO_BUCKET_AUDIO: meeting-audio
       MINIO_BUCKET_TRANSCRIPTS: meeting-transcripts
-      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
-      JWT_SECRET: ${JWT_SECRET}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:?Set DEEPGRAM_API_KEY}
+      JWT_SECRET: ${JWT_SECRET:?Set a strong JWT_SECRET}
       JWT_ALGORITHM: HS256
       JWT_EXPIRATION_HOURS: 24
-      CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY}
-      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
+      CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:?Set CLERK_PUBLISHABLE_KEY}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?Set CLERK_SECRET_KEY}
+      CLERK_ISSUER: ${CLERK_ISSUER}
+      CLERK_JWKS_URL: ${CLERK_JWKS_URL}
+      CHECKPOINTER_BACKEND: postgres
       API_V1_PREFIX: /api/v1
       CORS_ORIGINS: https://app.praxisflow.com,https://api.praxisflow.com
       # LLM Gateway
       LLM_GATEWAY_URL: http://llm-gateway:4000
-      LLM_GATEWAY_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LLM_GATEWAY_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set a strong LITELLM_MASTER_KEY}
+      WEBHOOK_LOOKUP_DATABASE_URL: ${WEBHOOK_LOOKUP_DATABASE_URL:?Set the read-only webhook lookup role connection string}
       # Observability
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_HOST: http://langfuse:3000
-    ports:
-      - "8000:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -385,7 +345,7 @@ services:
       postgres-primary:
         condition: service_healthy
       qdrant:
-        condition: service_started
+        condition: service_healthy
       neo4j:
         condition: service_healthy
       kafka:
@@ -394,11 +354,15 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       llm-gateway:
         condition: service_healthy
     networks:
       - praxisflow-internal
       - praxisflow-monitoring
+      - praxisflow-egress
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # CELERY WORKERS
@@ -412,20 +376,27 @@ services:
     environment:
       ENVIRONMENT: production
       LOG_LEVEL: INFO
-      DATABASE_URL: postgresql://${POSTGRES_USER:-praxisflow}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB:-praxisflow}
+      DATABASE_URL: ${APP_DATABASE_URL:?Set APP_DATABASE_URL to the restricted praxisflow_app role connection string}
+      RLS_ENFORCED: "true"
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-praxisflow}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      MINIO_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:?Set DEEPGRAM_API_KEY}
+      JWT_SECRET: ${JWT_SECRET:?Set a strong JWT_SECRET}
+      CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:?Set CLERK_PUBLISHABLE_KEY}
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?Set CLERK_SECRET_KEY}
+      CLERK_ISSUER: ${CLERK_ISSUER}
+      CLERK_JWKS_URL: ${CLERK_JWKS_URL}
+      WEBHOOK_LOOKUP_DATABASE_URL: ${WEBHOOK_LOOKUP_DATABASE_URL:?Set the read-only webhook lookup role connection string}
       LLM_GATEWAY_URL: http://llm-gateway:4000
-      LLM_GATEWAY_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LLM_GATEWAY_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set a strong LITELLM_MASTER_KEY}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
@@ -445,41 +416,19 @@ services:
           cpus: '2'
           memory: 4G
     depends_on:
-      - backend
-      - redis
-      - kafka
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     networks:
       - praxisflow-internal
       - praxisflow-monitoring
-
-  worker-beat:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: praxisflow-worker-beat
-    command: celery -A app.workers.celery_app beat --loglevel=info
-    environment:
-      ENVIRONMENT: production
-      LOG_LEVEL: INFO
-      DATABASE_URL: postgresql://${POSTGRES_USER:-praxisflow}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB:-praxisflow}
-      REDIS_URL: redis://redis:6379
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-    healthcheck:
-      test: ["CMD", "celery", "-A", "app.workers.celery_app", "inspect", "ping"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-    depends_on:
-      - redis
-      - kafka
-    networks:
-      - praxisflow-internal
+      - praxisflow-egress
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # FRONTEND
@@ -493,9 +442,7 @@ services:
       NEXT_PUBLIC_API_URL: https://api.praxisflow.com
       NEXT_PUBLIC_WS_URL: wss://api.praxisflow.com
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY}
-      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY}
-    ports:
-      - "3000:3000"
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?Set CLERK_SECRET_KEY}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
       interval: 30s
@@ -511,10 +458,12 @@ services:
           cpus: '0.5'
           memory: 1G
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - praxisflow-internal
       - praxisflow-external
+    restart: unless-stopped
 
   # ═══════════════════════════════════════════════════════════════
   # OBSERVABILITY STACK
@@ -526,10 +475,10 @@ services:
     volumes:
       - ./infrastructure/otel/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"  # OTLP gRPC
-      - "4318:4318"  # OTLP HTTP
-      - "8888:8888"  # Prometheus metrics
-      - "13133:13133" # Health check
+      - "127.0.0.1:4317:4317"  # OTLP gRPC
+      - "127.0.0.1:4318:4318"  # OTLP HTTP
+      - "127.0.0.1:8888:8888"  # Prometheus metrics
+      - "127.0.0.1:13133:13133" # Health check
     networks:
       - praxisflow-monitoring
     deploy:
@@ -542,26 +491,30 @@ services:
     image: langfuse/langfuse:2
     container_name: praxisflow-langfuse
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-praxisflow}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB:-praxisflow}
+      DATABASE_URL: ${LANGFUSE_DATABASE_URL:?Set a dedicated Langfuse database URL}
       REDIS_URL: redis://redis:6379
       NEXTAUTH_URL: http://langfuse:3000
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
-      SALT: ${LANGFUSE_SALT}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?Set LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT:?Set LANGFUSE_SALT}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?Set LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?Set LANGFUSE_SECRET_KEY}
       TELEMETRY_ENABLED: "false"
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3002:3000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     depends_on:
-      - postgres-primary
-      - redis
+      postgres-primary:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
+      - praxisflow-internal
       - praxisflow-monitoring
+    restart: unless-stopped
     deploy:
       resources:
         limits:
@@ -580,7 +533,7 @@ services:
       - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     networks:
       - praxisflow-monitoring
     deploy:
@@ -594,7 +547,7 @@ services:
     container_name: praxisflow-grafana
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set a strong GRAFANA_ADMIN_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_ROOT_URL: https://grafana.praxisflow.com
       GF_INSTALL_PLUGINS: grafana-piechart-panel
@@ -603,7 +556,7 @@ services:
       - ./infrastructure/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - grafana_data:/var/lib/grafana
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     networks:
       - praxisflow-monitoring
     depends_on:
@@ -629,14 +582,16 @@ services:
       - "80:80"
       - "443:443"
     depends_on:
-      - frontend
-      - backend
-      - llm-gateway
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     networks:
       - praxisflow-internal
       - praxisflow-external
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD", "curl", "-kfsS", "https://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -650,25 +605,26 @@ services:
   # BACKUP SERVICE
   # ═══════════════════════════════════════════════════════════════
   backup:
-    image: postgres:16-alpine
+    build:
+      context: .
+      dockerfile: infrastructure/docker/backup.Dockerfile
     container_name: praxisflow-backup
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      BACKUP_SCHEDULE: "0 2 * * *"  # Daily at 2 AM
+      BACKUP_DATABASE_URL: ${BACKUP_DATABASE_URL:?Set the read-only praxisflow_backup connection string}
+      BACKUP_HOUR_UTC: 2
       BACKUP_RETENTION_DAYS: 30
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-praxisflow}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      S3_BUCKET: backups
-      S3_REGION: us-east-1
+      BACKUP_DIR: /backups
+      S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:?Set an off-host S3-compatible backup endpoint}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:?Set BACKUP_S3_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:?Set BACKUP_S3_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${BACKUP_S3_REGION:-us-east-1}
+      S3_BUCKET: ${BACKUP_S3_BUCKET:?Set BACKUP_S3_BUCKET}
     volumes:
-      - ./infrastructure/scripts/backup.sh:/backup.sh:ro
-    entrypoint: /bin/sh -c "chmod +x /backup.sh && /backup.sh"
-    depends_on:
-      - postgres-primary
-      - minio
+      - backup_data:/backups
     networks:
       - praxisflow-internal
+      - praxisflow-egress
+    restart: unless-stopped
     deploy:
       resources:
         limits:
@@ -681,7 +637,7 @@ services:
 volumes:
   postgres_primary_data:
     driver: local
-  postgres_replica_data:
+  backup_data:
     driver: local
   qdrant_data:
     driver: local
@@ -712,6 +668,8 @@ networks:
     driver: bridge
     internal: true
   praxisflow-external:
+    driver: bridge
+  praxisflow-egress:
     driver: bridge
   praxisflow-monitoring:
     driver: bridge

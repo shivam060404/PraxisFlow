@@ -25,6 +25,7 @@ model Tenant {
   dataSubjectRequests  DataSubjectRequest[]
   complianceExports    ComplianceExport[]
   aiAuditLogs  AiAuditLog[]
+  humanReviews HumanReview[]
 
   @@index([slug])
 }
@@ -74,6 +75,7 @@ model Meeting {
   tasks      Task[]
   flags      MeetingFlag[]
   aiAuditLogs AiAuditLog[]
+  humanReviews HumanReview[]
 
   @@index([tenantId, status])
   @@index([tenantId, scheduledAt])
@@ -167,6 +169,7 @@ model Task {
   transcriptWordStart Int
   transcriptWordEnd   Int
   sourceQuote         String        @db.Text
+  extractionFingerprint String?
 
   // Verification
   verificationStatus  VerificationStatus @default(PENDING)
@@ -197,6 +200,7 @@ model Task {
   @@index([meetingId, taskType])
   @@index([assigneeId, status])
   @@index([externalId, integrationId])
+  @@unique([meetingId, extractionFingerprint])
 }
 
 enum TaskType {
@@ -281,6 +285,7 @@ model AiAuditLog {
   tenantId           String
   taskId             String?
   meetingId          String?
+  reviewId           String?  @unique
   decisionType       String
   model              String
   promptTokens       Int?
@@ -299,6 +304,30 @@ model AiAuditLog {
   @@index([tenantId, createdAt])
   @@index([taskId])
   @@index([meetingId])
+}
+
+model HumanReview {
+  id                  String   @id @default(uuid())
+  tenantId            String
+  meetingId           String
+  reviewId            String   @unique
+  taskData            Json
+  transcriptEvidence  String   @db.Text
+  reason              String   @db.Text
+  confidence          Float
+  status              String   @default("PENDING")
+  reviewerId          String?
+  reviewerComment     String?  @db.Text
+  decisionPayload     Json?
+  reviewedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status, createdAt])
+  @@index([meetingId, status])
 }
 
 // ─── Meeting Flags ───
